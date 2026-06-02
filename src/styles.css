@@ -633,14 +633,14 @@ select {
   flex-direction: column;
   justify-content: center;
   align-items: center;
-  gap: 15px;
-  padding: 18px 0;
+  gap: 9px;
+  padding: 10px 0;
   height: 100%;
 }
 
 .pet-shell.compact .pet-machine-container {
-  width: 110px;
-  height: 84px;
+  width: 104px;
+  height: 80px;
 }
 
 .pet-shell.compact .pet-expression {

@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 
 type PetStatus = "Sleeping" | "Mining" | "Lucky Flash" | "Cooling Down" | "Connection Error" | "New Best Diff";
 
@@ -158,6 +158,19 @@ function App() {
   const [isNewBest, setIsNewBest] = useState(false);
   const [displayMode, setDisplayMode] = useState<"compact" | "detail">("compact");
 
+  const coolingDownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const simShareTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const simLuckyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Component unmount cleanup
+  useEffect(() => {
+    return () => {
+      if (coolingDownTimerRef.current) clearTimeout(coolingDownTimerRef.current);
+      if (simShareTimerRef.current) clearTimeout(simShareTimerRef.current);
+      if (simLuckyTimerRef.current) clearTimeout(simLuckyTimerRef.current);
+    };
+  }, []);
+
   // App Uptime Timer
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -290,16 +303,26 @@ function App() {
 
         setLatestLog(`[${timeStr}] Share submitted: job_id=sim-${jobNum}, nonce=${nonceHex}`);
 
-        setTimeout(() => {
+        if (simShareTimerRef.current) {
+          clearTimeout(simShareTimerRef.current);
+        }
+        simShareTimerRef.current = setTimeout(() => {
           if (isShareAccepted) {
             setSimAccepted((a) => a + 1);
             setLatestLog(`[${new Date().toLocaleTimeString()}] Share accepted!`);
             setIsLucky(true);
-            setTimeout(() => setIsLucky(false), 3000);
+            if (simLuckyTimerRef.current) {
+              clearTimeout(simLuckyTimerRef.current);
+            }
+            simLuckyTimerRef.current = setTimeout(() => {
+              setIsLucky(false);
+              simLuckyTimerRef.current = null;
+            }, 3000);
           } else {
             setSimRejected((r) => r + 1);
             setLatestLog(`[${new Date().toLocaleTimeString()}] Share rejected. Reason: share target out of range`);
           }
+          simShareTimerRef.current = null;
         }, 300);
       } else if (rand < 0.3) {
         const jobNum = Math.floor(Math.random() * 1000);
@@ -324,6 +347,15 @@ function App() {
       clearTimeout(t1);
       clearTimeout(t2);
       clearTimeout(t3);
+      if (simShareTimerRef.current) {
+        clearTimeout(simShareTimerRef.current);
+        simShareTimerRef.current = null;
+      }
+      if (simLuckyTimerRef.current) {
+        clearTimeout(simLuckyTimerRef.current);
+        simLuckyTimerRef.current = null;
+      }
+      setIsLucky(false);
       setLatestLog(`[${new Date().toLocaleTimeString()}] Mining stopped`);
     };
   }, [isMining, realModeEnabled]);
@@ -370,6 +402,11 @@ function App() {
   const startMining = async () => {
     setErrorMessage("");
     setMiningUptime(0);
+    setIsCoolingDown(false);
+    if (coolingDownTimerRef.current) {
+      clearTimeout(coolingDownTimerRef.current);
+      coolingDownTimerRef.current = null;
+    }
 
     if (!realModeEnabled) {
       setIsMining(true);
@@ -407,7 +444,13 @@ function App() {
   const stopMining = async () => {
     setIsMining(false);
     setIsCoolingDown(true);
-    setTimeout(() => setIsCoolingDown(false), 4000);
+    if (coolingDownTimerRef.current) {
+      clearTimeout(coolingDownTimerRef.current);
+    }
+    coolingDownTimerRef.current = setTimeout(() => {
+      setIsCoolingDown(false);
+      coolingDownTimerRef.current = null;
+    }, 4000);
 
     if (realModeEnabled) {
       setRealStats((current) => ({
