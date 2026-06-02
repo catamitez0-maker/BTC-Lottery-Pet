@@ -444,6 +444,19 @@ function App() {
   const stopMining = async () => {
     setIsMining(false);
     setIsCoolingDown(true);
+
+    // Clear simulation timers immediately to avoid late logs/flashes after STOP
+    if (simShareTimerRef.current) {
+      clearTimeout(simShareTimerRef.current);
+      simShareTimerRef.current = null;
+    }
+    if (simLuckyTimerRef.current) {
+      clearTimeout(simLuckyTimerRef.current);
+      simLuckyTimerRef.current = null;
+    }
+    setIsLucky(false);
+    setIsNewBest(false);
+
     if (coolingDownTimerRef.current) {
       clearTimeout(coolingDownTimerRef.current);
     }

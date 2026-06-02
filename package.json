@@ -7,7 +7,10 @@
     "dev": "vite --configLoader runner",
     "build": "tsc && vite build --configLoader runner",
     "preview": "vite preview --configLoader runner",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
+    "tauri:build": "tauri build",
+    "tauri:build-dev": "tauri build --config src-tauri/tauri.dev.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
