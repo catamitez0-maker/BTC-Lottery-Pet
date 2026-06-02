@@ -111,25 +111,272 @@ h1 {
   padding: 11px 0 10px;
 }
 
-.pet-orb {
-  align-items: center;
-  background: #222630;
-  border: 1px solid #353b47;
-  border-radius: 50%;
-  color: #858b96;
+/* Container for the slot machine pet */
+.pet-machine-container {
   display: flex;
-  font-size: 12px;
-  font-weight: 800;
-  height: 34px;
+  align-items: center;
   justify-content: center;
-  width: 34px;
+  width: 60px;
+  height: 46px;
+  position: relative;
 }
 
-.pet-orb.awake {
-  background: #f7931a;
-  border-color: #ffb04e;
-  box-shadow: 0 0 18px rgba(247, 147, 26, 0.35);
-  color: #241500;
+/* Cabinet chassis */
+.pet-machine {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(135deg, #2b303c, #16181f);
+  border: 1px solid #4a5164;
+  border-radius: 5px;
+  display: flex;
+  flex-direction: column;
+  padding: 2px;
+  position: relative;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.45);
+  transition: all 0.2s ease;
+}
+
+/* Lights at the top */
+.pet-lights {
+  display: flex;
+  justify-content: space-around;
+  margin-bottom: 2px;
+  padding: 0 4px;
+}
+
+.light {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: #333946;
+}
+
+/* Screen */
+.pet-screen {
+  background: #091210;
+  border: 1px solid #142820;
+  border-radius: 3px;
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 2px;
+  overflow: hidden;
+}
+
+/* Expression display */
+.pet-expression {
+  color: #00ff66;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 8px;
+  text-align: center;
+  line-height: 1;
+  text-shadow: 0 0 2px #00ff66;
+}
+
+/* Slot windows row */
+.pet-slots {
+  display: flex;
+  justify-content: space-between;
+  gap: 2px;
+  margin-top: 1px;
+}
+
+/* Individual reel window */
+.slot-reel {
+  flex: 1;
+  height: 13px;
+  background: #050505;
+  border: 1px solid #181c24;
+  border-radius: 1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 7px;
+  font-weight: 800;
+  color: #f7931a;
+  overflow: hidden;
+  position: relative;
+}
+
+/* Active spinning container */
+.reel-strip {
+  display: flex;
+  flex-direction: column;
+  position: absolute;
+  top: 0;
+  width: 100%;
+  animation: spin 0.35s linear infinite;
+}
+
+.reel-strip.delay-1 {
+  animation-delay: 0.08s;
+}
+
+.reel-strip.delay-2 {
+  animation-delay: 0.16s;
+}
+
+.reel-strip span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 13px;
+  color: #f7931a;
+  text-shadow: 0 0 2px rgba(247, 147, 26, 0.7);
+}
+
+/* Decorative buttons at the bottom */
+.pet-panel-decor {
+  display: flex;
+  gap: 3px;
+  margin-top: 1.5px;
+  justify-content: flex-end;
+  padding-right: 2px;
+}
+
+.decor-btn {
+  width: 2.5px;
+  height: 2.5px;
+  border-radius: 50%;
+}
+
+.decor-btn-red { background: #ff4a4a; }
+.decor-btn-blue { background: #00bcd4; }
+
+/* Smoke Container for glitches */
+.smoke-container {
+  position: absolute;
+  top: -6px;
+  left: 6px;
+  width: 100%;
+  pointer-events: none;
+}
+
+.smoke-puff {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  background: rgba(220, 225, 235, 0.35);
+  border-radius: 50%;
+  opacity: 0;
+}
+
+/* State Animation Classes */
+
+/* SLEEPING: Breathing animation, lights off */
+.sleeping .pet-machine {
+  animation: breathe 3s ease-in-out infinite;
+  border-color: #3b4252;
+}
+
+.sleeping .light {
+  background: #252932;
+}
+
+/* MINING: Active flashing golden lights */
+.mining .pet-machine {
+  border-color: #f7931a;
+  box-shadow: 0 0 8px rgba(247, 147, 26, 0.25);
+}
+
+.mining .light-1 { animation: flash-led 0.6s step-end infinite; }
+.mining .light-2 { animation: flash-led 0.6s step-end infinite 0.2s; }
+.mining .light-3 { animation: flash-led 0.6s step-end infinite 0.4s; }
+
+/* LUCKY FLASH: Strobing rainbow colors, flashing slots */
+.lucky-flash .pet-machine {
+  animation: lucky-pulse 0.4s ease-in-out infinite;
+  transform: translateY(-1.5px);
+}
+
+.lucky-flash .light {
+  animation: flash-led 0.25s step-end infinite;
+}
+
+/* NEW BEST DIFF: Excitement jumping, glowing green */
+.new-best-diff .pet-machine {
+  animation: jump 0.5s ease-in-out infinite;
+  border-color: #39e575;
+  box-shadow: 0 0 10px rgba(57, 229, 117, 0.5);
+}
+
+.new-best-diff .light {
+  background: #39e575;
+  box-shadow: 0 0 4px #39e575;
+}
+
+/* CONNECTION ERROR: Glitching shaking, red flashing lights, smoke puffs */
+.connection-error .pet-machine {
+  animation: glitch-shake 0.15s linear infinite;
+  border-color: #ff4a4a;
+  box-shadow: 0 0 8px rgba(255, 74, 74, 0.4);
+}
+
+.connection-error .light {
+  background: #ff4a4a;
+  animation: flash-led 0.15s step-end infinite;
+}
+
+.connection-error .smoke-puff.puff-1 {
+  animation: smoke 1s ease-out infinite;
+}
+
+.connection-error .smoke-puff.puff-2 {
+  animation: smoke 1s ease-out infinite 0.5s;
+  left: 14px;
+}
+
+/* COOLING DOWN: Lights fading to orange */
+.cooling-down .pet-machine {
+  border-color: #ff9800;
+  box-shadow: 0 0 5px rgba(255, 152, 0, 0.3);
+}
+
+.cooling-down .light {
+  background: #ff9800;
+  opacity: 0.6;
+}
+
+/* Keyframe Definitions */
+@keyframes breathe {
+  0%, 100% { transform: scale(1.0); filter: brightness(0.9); }
+  50% { transform: scale(1.03); filter: brightness(1.1); }
+}
+
+@keyframes spin {
+  0% { transform: translateY(0); }
+  100% { transform: translateY(-66.66%); }
+}
+
+@keyframes flash-led {
+  0%, 100% { background: #ff4a4a; box-shadow: 0 0 3px #ff4a4a; }
+  33% { background: #ffd54f; box-shadow: 0 0 3px #ffd54f; }
+  66% { background: #29b6f6; box-shadow: 0 0 3px #29b6f6; }
+}
+
+@keyframes jump {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+@keyframes smoke {
+  0% { transform: translate(0, 0) scale(0.6); opacity: 0; }
+  20% { opacity: 0.6; }
+  100% { transform: translate(-8px, -15px) scale(1.5); opacity: 0; }
+}
+
+@keyframes glitch-shake {
+  0%, 100% { transform: translate(0, 0); }
+  25% { transform: translate(-0.8px, 0.8px) rotate(-0.5deg); }
+  50% { transform: translate(-0.8px, -0.8px); }
+  75% { transform: translate(0.8px, 0.8px) rotate(0.5deg); }
+}
+
+@keyframes lucky-pulse {
+  0%, 100% { box-shadow: 0 0 10px #ffd700, inset 0 0 3px #ffd700; border-color: #ffd700; }
+  50% { box-shadow: 0 0 16px #ff007f, inset 0 0 6px #ff007f; border-color: #ff007f; }
 }
 
 .status {
@@ -170,22 +417,23 @@ h1 {
 
 .metrics {
   display: grid;
-  gap: 6px;
+  gap: 4px;
   grid-template-columns: 1fr 1fr;
+  padding-bottom: 2px;
 }
 
 article {
-  background: rgba(255, 255, 255, 0.035);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 7px;
-  padding: 7px 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 5px;
+  padding: 4px 6px;
 }
 
 strong {
   display: block;
   font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 12px;
-  margin-top: 3px;
+  font-size: 11px;
+  margin-top: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -234,7 +482,7 @@ footer {
   padding: 5px 7px;
   position: absolute;
   right: 8px;
-  z-index: 3;
+  z-index: 5;
 }
 
 .overlay {
@@ -342,4 +590,33 @@ select {
   margin-top: 2px;
   padding: 3px 5px;
   width: 100%;
+}
+
+.log-ticker {
+  display: flex;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.22);
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 4px 10px;
+  font-size: 9px;
+  color: #a5abb4;
+  overflow: hidden;
+  white-space: nowrap;
+  align-items: center;
+  margin: 4px -14px 2px;
+}
+
+.log-label {
+  color: #f7931a;
+  font-weight: 800;
+  font-size: 8px;
+  letter-spacing: 0.05em;
+}
+
+.log-text {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 8.5px;
 }

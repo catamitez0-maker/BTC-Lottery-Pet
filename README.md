@@ -47,8 +47,12 @@ The settings panel includes:
 
 | Pool host | Port | Notes |
 | --- | ---: | --- |
-| `pool.nerdminers.org` | `3333` | Default. Official NerdMiner community pool tuned for low difficulty shares. |
-| `public-pool.io` | `21496` | Shared Public Pool low-difficulty endpoint listed by the NerdMiner project. |
+| `public-pool.io` | `21496` | Default. Shared Public Pool low-difficulty endpoint listed by the NerdMiner project. |
+| `pool.nerdminers.org` | `3333` | Official NerdMiner community pool. Its operator documents hardware restrictions, so verify compatibility before using this desktop client. |
+
+The presets are convenience defaults, not availability guarantees. The pool
+host field remains editable so you can use another trusted Stratum v1 solo
+pool after reviewing its documentation.
 
 The default worker username sent to the pool is:
 
@@ -77,6 +81,12 @@ The current client is intentionally small. It supports plain Stratum v1 TCP,
 not Stratum TLS, Stratum v2, proxy mode, failover pools, remote management, or
 profit-switching.
 
+To keep an untrusted or misconfigured pool from consuming unbounded local
+resources, the client caps each Stratum line at 1 MiB, keeps at most 128
+unanswered share submissions, and sends at most 16 queued shares before
+returning to socket reads. It also rejects non-positive and pathologically low
+share difficulties.
+
 ## Configuration
 
 The repository-level [`config.json`](./config.json) contains defaults:
@@ -84,8 +94,8 @@ The repository-level [`config.json`](./config.json) contains defaults:
 ```json
 {
   "btc_address": "",
-  "pool_host": "pool.nerdminers.org",
-  "pool_port": 3333,
+  "pool_host": "public-pool.io",
+  "pool_port": 21496,
   "worker_name": "btc-lottery-pet",
   "cpu_limit_percent": 10,
   "cpu_threads": 1,
@@ -98,6 +108,10 @@ configuration directory. Existing Phase 1 config files are normalized when
 loaded. `cpu_threads` is the enforced real-mining CPU limit and defaults to one
 thread. The older `cpu_limit_percent` field remains reserved for future
 fine-grained throttling.
+
+Upgrades preserve an existing saved pool selection. If you previously ran the
+app with the older `pool.nerdminers.org` default, review the settings panel and
+switch pools manually when appropriate.
 
 For safety, `real_mining_enabled` remains `false` in saved configuration.
 Enabling real mode is a session-only UI action. Every app launch starts in
@@ -147,3 +161,5 @@ cmd.exe /v:on /d /s /c 'call "C:\Program Files (x86)\Microsoft Visual Studio\202
 ```
 
 Tauri writes Windows bundle artifacts under `src-tauri\target\release\bundle`.
+The generated installer may download Microsoft's WebView2 bootstrapper when
+the WebView2 runtime is missing from the target computer.

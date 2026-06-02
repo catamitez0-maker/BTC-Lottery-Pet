@@ -30,8 +30,8 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             btc_address: String::new(),
-            pool_host: "pool.nerdminers.org".into(),
-            pool_port: 3333,
+            pool_host: "public-pool.io".into(),
+            pool_port: 21496,
             worker_name: "btc-lottery-pet".into(),
             cpu_limit_percent: 10,
             cpu_threads: 1,
@@ -48,11 +48,11 @@ impl AppConfig {
         self.real_mining_enabled = false;
 
         if self.pool_host.is_empty() {
-            self.pool_host = "pool.nerdminers.org".into();
+            self.pool_host = "public-pool.io".into();
         }
 
         if self.pool_port == 0 {
-            self.pool_port = 3333;
+            self.pool_port = default_port_for_pool(&self.pool_host);
         }
 
         if self.worker_name.is_empty() {
@@ -64,6 +64,14 @@ impl AppConfig {
         }
 
         self
+    }
+}
+
+fn default_port_for_pool(pool_host: &str) -> u16 {
+    if pool_host == "public-pool.io" {
+        21496
+    } else {
+        3333
     }
 }
 
@@ -161,8 +169,7 @@ fn tray_icon() -> Image<'static> {
 
             let vertical = (x == 14 || x == 17) && (7..=24).contains(&y);
             let horizontal = (8..=22).contains(&x) && (y == 10 || y == 16 || y == 22);
-            let rounded_edge =
-                (x == 22 && (11..=15).contains(&y)) || (x == 22 && (17..=21).contains(&y));
+            let rounded_edge = x == 22 && ((11..=15).contains(&y) || (17..=21).contains(&y));
 
             if inside_coin && (vertical || horizontal || rounded_edge) {
                 rgba[index] = 61;

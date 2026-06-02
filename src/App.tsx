@@ -1,8 +1,8 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 
-type PetStatus = "Sleeping" | "Mining" | "Lucky Flash";
+type PetStatus = "Sleeping" | "Mining" | "Lucky Flash" | "Cooling Down" | "Connection Error" | "New Best Diff";
 
 interface AppConfig {
   btc_address: string;
@@ -31,8 +31,8 @@ interface RealMiningStats {
 
 const fallbackConfig: AppConfig = {
   btc_address: "",
-  pool_host: "pool.nerdminers.org",
-  pool_port: 3333,
+  pool_host: "public-pool.io",
+  pool_port: 21496,
   worker_name: "btc-lottery-pet",
   cpu_limit_percent: 10,
   cpu_threads: 1,
@@ -48,7 +48,23 @@ const idleRealStats: RealMiningStats = {
   connection_status: "Stopped",
 };
 
-const blockHeightPlaceholder = "890,000";
+const runningInTauri = isTauri();
+
+function formatError(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function presetPort(poolHost: string, currentPort: number) {
+  if (poolHost === "public-pool.io") {
+    return 21496;
+  }
+
+  if (poolHost === "pool.nerdminers.org") {
+    return 3333;
+  }
+
+  return currentPort;
+}
 
 function formatUptime(seconds: number) {
   const hours = Math.floor(seconds / 3600);
@@ -78,10 +94,47 @@ function formatHashrate(hashrate: number) {
   return `${hashrate.toFixed(0)} H/s`;
 }
 
+function getPetExpression(status: PetStatus): string {
+  switch (status) {
+    case "Sleeping":
+      return "( -ω- )zzZ";
+    case "Cooling Down":
+      return "( ~_~ )";
+    case "Connection Error":
+      return "( x_x )";
+    case "Lucky Flash":
+      return "( ★∀★ )";
+    case "New Best Diff":
+      return "( ≧▽≦ )";
+    case "Mining":
+      return "( •̀_•́ )";
+    default:
+      return "( •̀_•́ )";
+  }
+}
+
+function getSlotChar(status: PetStatus, index: number): string {
+  switch (status) {
+    case "Sleeping":
+      return ["Z", "z", "Z"][index];
+    case "Cooling Down":
+      return ["C", "O", "L"][index];
+    case "Connection Error":
+      return ["E", "R", "R"][index];
+    case "Lucky Flash":
+      return ["₿", "₿", "₿"][index];
+    case "New Best Diff":
+      return ["B", "S", "T"][index];
+    default:
+      return "-";
+  }
+}
+
 function App() {
   const [isMining, setIsMining] = useState(false);
   const [alwaysOnTop, setAlwaysOnTop] = useState(true);
-  const [uptime, setUptime] = useState(0);
+  const [appUptime, setAppUptime] = useState(0);
+  const [miningUptime, setMiningUptime] = useState(0);
   const [config, setConfig] = useState<AppConfig>(fallbackConfig);
   const [draftConfig, setDraftConfig] = useState<AppConfig>(fallbackConfig);
   const [realModeEnabled, setRealModeEnabled] = useState(false);
@@ -95,24 +148,50 @@ function App() {
     bestDifficulty: 0.01,
   });
 
+  const [simAccepted, setSimAccepted] = useState(0);
+  const [simRejected, setSimRejected] = useState(0);
+  const [blockHeight, setBlockHeight] = useState("Loading...");
+  const [latestLog, setLatestLog] = useState("[System] Ready");
+
+  const [isCoolingDown, setIsCoolingDown] = useState(false);
+  const [isLucky, setIsLucky] = useState(false);
+  const [isNewBest, setIsNewBest] = useState(false);
+
+  // App Uptime Timer
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setUptime((value) => value + 1);
+      setAppUptime((value) => value + 1);
     }, 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
+  // Mining Uptime Timer
+  useEffect(() => {
+    if (!isMining) return;
+    const timer = window.setInterval(() => {
+      setMiningUptime((value) => value + 1);
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [isMining]);
+
+  // Load Config
+  useEffect(() => {
     invoke<AppConfig>("get_config")
       .then((loadedConfig) => {
         setConfig(loadedConfig);
         setDraftConfig(loadedConfig);
       })
-      .catch(() => {
+      .catch((error) => {
         setConfig(fallbackConfig);
         setDraftConfig(fallbackConfig);
-      });
 
-    return () => window.clearInterval(timer);
+        if (runningInTauri) {
+          setErrorMessage(`Could not load settings: ${formatError(error)}`);
+        }
+      });
   }, []);
 
+  // Listen to Mining Stats
   useEffect(() => {
     let unlisten = () => {};
 
@@ -122,18 +201,111 @@ function App() {
       .then((cleanup) => {
         unlisten = cleanup;
       })
-      .catch(() => {});
+      .catch((error) => {
+        if (runningInTauri) {
+          setErrorMessage(`Could not listen for mining stats: ${formatError(error)}`);
+        }
+      });
 
     return () => unlisten();
   }, []);
 
+  // Listen to Mining Logs
+  useEffect(() => {
+    let unlisten = () => {};
+
+    listen<string>("mining-log", (event) => {
+      setLatestLog(event.payload);
+    })
+      .then((cleanup) => {
+        unlisten = cleanup;
+      })
+      .catch((error) => {
+        if (runningInTauri) {
+          setErrorMessage(`Could not listen for mining logs: ${formatError(error)}`);
+        }
+      });
+
+    return () => unlisten();
+  }, []);
+
+  // Fetch Block Height
+  useEffect(() => {
+    const getBlockHeight = async () => {
+      const urls = [
+        "https://mempool.space/api/blocks/tip/height",
+        "https://blockstream.info/api/blocks/tip/height",
+        "https://blockchain.info/q/getblockcount"
+      ];
+      for (const url of urls) {
+        try {
+          const res = await fetch(url);
+          if (res.ok) {
+            const val = await res.text();
+            const num = parseInt(val.trim(), 10);
+            if (!isNaN(num) && num > 0) {
+              setBlockHeight(num.toLocaleString());
+              return;
+            }
+          }
+        } catch (e) {
+          console.warn(`Failed to fetch block height from ${url}:`, e);
+        }
+      }
+      setBlockHeight("Offline");
+    };
+
+    getBlockHeight();
+    const timer = setInterval(getBlockHeight, 30_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Simulation Mining Loop
   useEffect(() => {
     if (!isMining || realModeEnabled) {
       return;
     }
 
+    const startSecs = new Date().toLocaleTimeString();
+    setLatestLog(`[${startSecs}] Connecting to simulation pool...`);
+    const t1 = setTimeout(() => {
+      setLatestLog(`[${new Date().toLocaleTimeString()}] Connected to simulation pool`);
+    }, 600);
+    const t2 = setTimeout(() => {
+      setLatestLog(`[${new Date().toLocaleTimeString()}] Subscribed to simulation pool`);
+    }, 1200);
+    const t3 = setTimeout(() => {
+      setLatestLog(`[${new Date().toLocaleTimeString()}] Authorized worker successfully`);
+    }, 1800);
+
     const updateStats = () => {
       setSimulationStats((current) => {
+        const rand = Math.random();
+        const timeStr = new Date().toLocaleTimeString();
+
+        if (rand < 0.12) {
+          const isShareAccepted = Math.random() < 0.95;
+          const jobNum = Math.floor(Math.random() * 1000);
+          const nonceHex = Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
+
+          setLatestLog(`[${timeStr}] Share submitted: job_id=sim-${jobNum}, nonce=${nonceHex}`);
+
+          setTimeout(() => {
+            if (isShareAccepted) {
+              setSimAccepted((a) => a + 1);
+              setLatestLog(`[${new Date().toLocaleTimeString()}] Share accepted!`);
+              setIsLucky(true);
+              setTimeout(() => setIsLucky(false), 3000);
+            } else {
+              setSimRejected((r) => r + 1);
+              setLatestLog(`[${new Date().toLocaleTimeString()}] Share rejected. Reason: share target out of range`);
+            }
+          }, 300);
+        } else if (rand < 0.3) {
+          const jobNum = Math.floor(Math.random() * 1000);
+          setLatestLog(`[${timeStr}] Job received: id=sim-${jobNum}, diff=0.01`);
+        }
+
         const luckyFlash = Math.random() < 0.08;
         const candidateDifficulty = Math.random() * Math.random() * 4_500;
 
@@ -146,12 +318,58 @@ function App() {
     };
 
     updateStats();
-    const timer = window.setInterval(updateStats, 1_000);
-    return () => window.clearInterval(timer);
+    const timer = window.setInterval(updateStats, 1000);
+    return () => {
+      window.clearInterval(timer);
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+      setLatestLog(`[${new Date().toLocaleTimeString()}] Mining stopped`);
+    };
   }, [isMining, realModeEnabled]);
+
+  // Track New Best Difficulty
+  const activeBestDiff = realModeEnabled ? realStats.best_difficulty : simulationStats.bestDifficulty;
+  const [prevBestDiff, setPrevBestDiff] = useState(0);
+
+  useEffect(() => {
+    if (!isMining) {
+      setPrevBestDiff(activeBestDiff);
+      return;
+    }
+    if (activeBestDiff > prevBestDiff) {
+      if (prevBestDiff > 0) {
+        setIsNewBest(true);
+        const timer = setTimeout(() => setIsNewBest(false), 3000);
+        setPrevBestDiff(activeBestDiff);
+        return () => clearTimeout(timer);
+      }
+      setPrevBestDiff(activeBestDiff);
+    }
+  }, [activeBestDiff, isMining]);
+
+  // Track Real Accepted Shares for Lucky Trigger
+  const [prevAcceptedShares, setPrevAcceptedShares] = useState(0);
+
+  useEffect(() => {
+    if (!isMining || !realModeEnabled) {
+      setPrevAcceptedShares(realStats.accepted_shares);
+      return;
+    }
+    if (realStats.accepted_shares > prevAcceptedShares) {
+      if (prevAcceptedShares > 0) {
+        setIsLucky(true);
+        const timer = setTimeout(() => setIsLucky(false), 3000);
+        setPrevAcceptedShares(realStats.accepted_shares);
+        return () => clearTimeout(timer);
+      }
+      setPrevAcceptedShares(realStats.accepted_shares);
+    }
+  }, [realStats.accepted_shares, isMining, realModeEnabled]);
 
   const startMining = async () => {
     setErrorMessage("");
+    setMiningUptime(0);
 
     if (!realModeEnabled) {
       setIsMining(true);
@@ -188,6 +406,8 @@ function App() {
 
   const stopMining = async () => {
     setIsMining(false);
+    setIsCoolingDown(true);
+    setTimeout(() => setIsCoolingDown(false), 4000);
 
     if (realModeEnabled) {
       setRealStats((current) => ({
@@ -198,8 +418,10 @@ function App() {
 
       try {
         await invoke("stop_real_mining");
-      } catch {
-        // Browser-only Vite previews have no Rust backend.
+      } catch (error) {
+        if (runningInTauri) {
+          setErrorMessage(`Could not stop mining: ${formatError(error)}`);
+        }
       }
       return;
     }
@@ -234,6 +456,8 @@ function App() {
   };
 
   const saveSettings = async () => {
+    setErrorMessage("");
+
     const settings = {
       ...draftConfig,
       pool_port: Number(draftConfig.pool_port),
@@ -245,8 +469,12 @@ function App() {
       const savedSettings = await invoke<AppConfig>("save_config", { config: settings });
       setConfig(savedSettings);
       setDraftConfig(savedSettings);
-    } catch {
-      // Keep browser previews useful while the Rust backend is unavailable.
+    } catch (error) {
+      if (runningInTauri) {
+        setErrorMessage(`Could not save settings: ${formatError(error)}`);
+        return;
+      }
+
       setConfig(settings);
       setDraftConfig(settings);
     }
@@ -256,37 +484,61 @@ function App() {
   };
 
   const toggleAlwaysOnTop = async () => {
+    setErrorMessage("");
+
     const nextValue = !alwaysOnTop;
 
     try {
       await invoke("set_window_always_on_top", { alwaysOnTop: nextValue });
       setAlwaysOnTop(nextValue);
-    } catch {
-      // Browser-only Vite previews have no Tauri window to update.
+    } catch (error) {
+      if (runningInTauri) {
+        setErrorMessage(`Could not update always-on-top: ${formatError(error)}`);
+        return;
+      }
+
       setAlwaysOnTop(nextValue);
     }
   };
 
-  const status = realModeEnabled
-    ? realStats.connection_status
-    : simulationStats.status;
-  const isLuckyFlash = !realModeEnabled && simulationStats.status === "Lucky Flash";
-  const metrics = realModeEnabled
-    ? [
-        ["HASHRATE", formatHashrate(realStats.hashrate)],
-        ["BEST DIFF", formatDifficulty(realStats.best_difficulty)],
-        ["SHARES A / R", `${realStats.accepted_shares} / ${realStats.rejected_shares}`],
-        ["JOB ID", realStats.current_job_id || "--"],
-      ]
-    : [
-        ["HASHRATE", `${simulationStats.hashrate.toFixed(2)} MH/s`],
-        ["BEST DIFF", formatDifficulty(simulationStats.bestDifficulty)],
-        ["UPTIME", formatUptime(uptime)],
-        ["BLOCK HEIGHT", blockHeightPlaceholder],
-      ];
+  const isConnectionError =
+    isMining &&
+    (blockHeight === "Offline" ||
+      (realModeEnabled &&
+        (realStats.connection_status === "Connecting" ||
+          realStats.connection_status.startsWith("Retrying") ||
+          realStats.connection_status === "Stopped")));
+
+  let petStatus: PetStatus;
+  if (!isMining && !isCoolingDown) {
+    petStatus = "Sleeping";
+  } else if (isCoolingDown) {
+    petStatus = "Cooling Down";
+  } else if (isConnectionError) {
+    petStatus = "Connection Error";
+  } else if (isLucky) {
+    petStatus = "Lucky Flash";
+  } else if (isNewBest) {
+    petStatus = "New Best Diff";
+  } else {
+    petStatus = "Mining";
+  }
+
+  const sharesValue = realModeEnabled
+    ? `${realStats.accepted_shares} / ${realStats.rejected_shares}`
+    : `${simAccepted} / ${simRejected}`;
+
+  const metrics = [
+    ["HASHRATE", realModeEnabled ? formatHashrate(realStats.hashrate) : `${simulationStats.hashrate.toFixed(2)} MH/s`],
+    ["BEST DIFF", formatDifficulty(realModeEnabled ? realStats.best_difficulty : simulationStats.bestDifficulty)],
+    ["BLOCK HEIGHT", blockHeight],
+    ["SHARES A / R", sharesValue],
+    ["APP UPTIME", formatUptime(appUptime)],
+    ["MINING UPTIME", formatUptime(miningUptime)],
+  ];
 
   return (
-    <main className={`pet-shell ${isLuckyFlash ? "lucky" : ""}`}>
+    <main className={`pet-shell ${petStatus === "Lucky Flash" ? "lucky" : ""}`}>
       <header className="topbar">
         <div>
           <p className="eyebrow">{realModeEnabled ? "REAL MINING MODE" : "SIMULATION MODE"}</p>
@@ -314,13 +566,59 @@ function App() {
       </header>
 
       <section className="status-row">
-        <div className={`pet-orb ${isMining ? "awake" : ""}`}>
-          <span>{isMining ? "B" : "zZ"}</span>
+        <div className={`pet-machine-container ${petStatus.toLowerCase().replace(/\s+/g, "-")}`}>
+          <div className="pet-machine">
+            <div className="pet-lights">
+              <span className="light light-1"></span>
+              <span className="light light-2"></span>
+              <span className="light light-3"></span>
+            </div>
+            <div className="pet-screen">
+              <div className="pet-expression">{getPetExpression(petStatus)}</div>
+              <div className="pet-slots">
+                <div className="slot-reel reel-1">
+                  {petStatus === "Mining" ? (
+                    <div className="reel-strip">
+                      <span>₿</span><span>9</span><span>7</span><span>2</span><span>3</span><span>₿</span>
+                    </div>
+                  ) : (
+                    <span>{getSlotChar(petStatus, 0)}</span>
+                  )}
+                </div>
+                <div className="slot-reel reel-2">
+                  {petStatus === "Mining" ? (
+                    <div className="reel-strip delay-1">
+                      <span>7</span><span>₿</span><span>1</span><span>8</span><span>5</span><span>7</span>
+                    </div>
+                  ) : (
+                    <span>{getSlotChar(petStatus, 1)}</span>
+                  )}
+                </div>
+                <div className="slot-reel reel-3">
+                  {petStatus === "Mining" ? (
+                    <div className="reel-strip delay-2">
+                      <span>9</span><span>2</span><span>₿</span><span>7</span><span>6</span><span>9</span>
+                    </div>
+                  ) : (
+                    <span>{getSlotChar(petStatus, 2)}</span>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="pet-panel-decor">
+              <span className="decor-btn decor-btn-red"></span>
+              <span className="decor-btn decor-btn-blue"></span>
+            </div>
+            <div className="smoke-container">
+              <span className="smoke-puff puff-1"></span>
+              <span className="smoke-puff puff-2"></span>
+            </div>
+          </div>
         </div>
         <div className="status-copy">
           <p className="label">STATUS</p>
-          <p className={`status ${isLuckyFlash ? "flash" : ""}`} title={status}>
-            {status}
+          <p className={`status ${petStatus === "Lucky Flash" ? "flash" : ""}`} title={petStatus}>
+            {petStatus}
           </p>
         </div>
         <button
@@ -340,6 +638,11 @@ function App() {
           </article>
         ))}
       </section>
+
+      <div className="log-ticker">
+        <span className="log-label">LOG:</span>
+        <span className="log-text" title={latestLog}>{latestLog}</span>
+      </div>
 
       <footer>
         <span className={`dot ${realModeEnabled ? "armed" : ""}`} />
@@ -410,20 +713,22 @@ function App() {
               </label>
               <label>
                 POOL HOST
-                <select
+                <input
+                  list="pool-presets"
                   value={draftConfig.pool_host}
                   onChange={(event) => {
                     const poolHost = event.target.value;
                     setDraftConfig({
                       ...draftConfig,
                       pool_host: poolHost,
-                      pool_port: poolHost === "public-pool.io" ? 21496 : 3333,
+                      pool_port: presetPort(poolHost, draftConfig.pool_port),
                     });
                   }}
-                >
-                  <option value="pool.nerdminers.org">pool.nerdminers.org</option>
-                  <option value="public-pool.io">public-pool.io</option>
-                </select>
+                />
+                <datalist id="pool-presets">
+                  <option value="public-pool.io" />
+                  <option value="pool.nerdminers.org" />
+                </datalist>
               </label>
               <label>
                 PORT

@@ -1,7 +1,8 @@
 use std::{
     collections::HashSet,
-    io::{BufRead, BufReader, ErrorKind, Write},
+    io::{self, BufRead, BufReader, ErrorKind, Read, Write},
     net::{TcpStream, ToSocketAddrs},
+    str::FromStr,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
@@ -11,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bitcoin::{Address, Network};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -20,7 +22,34 @@ const DIFF_ONE_TARGET: f64 =
     26_959_535_291_011_309_493_156_476_344_723_991_336_010_898_738_574_164_086_137_773_096_960.0;
 const MAX_STRATUM_LINE_BYTES: usize = 1024 * 1024;
 const MAX_EXTRANONCE2_BYTES: usize = 16;
+const MAX_PENDING_SUBMISSIONS: usize = 128;
+const MAX_SHARE_SUBMISSIONS_PER_TICK: usize = 16;
+const SHARE_QUEUE_CAPACITY: usize = 256;
+const MIN_SHARE_DIFFICULTY: f64 = 1e-12;
 const STATS_EVENT: &str = "mining-stats";
+
+fn log_message(app: &AppHandle, message: &str) {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let _ = app.emit("mining-log", message);
+
+    if let Err(e) = std::fs::create_dir_all("logs") {
+        eprintln!("Failed to create logs directory: {}", e);
+        return;
+    }
+
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let log_line = format!("[{}] {}\n", now, message);
+
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("logs/mining.log")
+    {
+        let _ = file.write_all(log_line.as_bytes());
+    }
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,17 +80,7 @@ impl RealMiningSettings {
             return Err("pool port must be greater than zero".into());
         }
 
-        let address = self.btc_address.trim();
-        let looks_like_mainnet_address =
-            address.starts_with("bc1") || address.starts_with('1') || address.starts_with('3');
-
-        if !looks_like_mainnet_address
-            || address.len() < 14
-            || address.len() > 90
-            || address.chars().any(char::is_whitespace)
-        {
-            return Err("enter a mainnet BTC address before starting real mining".into());
-        }
+        validate_mainnet_address(self.btc_address.trim())?;
 
         if self.worker_name.is_empty()
             || self
@@ -255,11 +274,12 @@ struct ProtocolState {
 
 fn run_miner(app: AppHandle, settings: RealMiningSettings, stop: Arc<AtomicBool>) {
     let shared = Arc::new(SharedMiningState::new(Arc::clone(&stop)));
-    let (share_sender, share_receiver) = mpsc::sync_channel(256);
+    let (share_sender, share_receiver) = mpsc::sync_channel(SHARE_QUEUE_CAPACITY);
     let workers = spawn_hash_workers(&settings, &shared, &share_sender);
 
     while !stop.load(Ordering::Acquire) {
         shared.set_connection_status("Connecting");
+        log_message(&app, &format!("Connecting to {}:{}", settings.pool_host, settings.pool_port));
         emit_stats(&app, &shared, 0.0);
 
         if let Err(error) = run_stratum_connection(&app, &settings, &shared, &share_receiver) {
@@ -269,6 +289,7 @@ fn run_miner(app: AppHandle, settings: RealMiningSettings, stop: Arc<AtomicBool>
 
             shared.clear_job();
             shared.set_connection_status(format!("Retrying: {error}"));
+            log_message(&app, &format!("Connection error: {}. Retrying in 2s...", error));
             emit_stats(&app, &shared, 0.0);
             sleep_until_stopped(&stop, Duration::from_secs(2));
         }
@@ -281,6 +302,7 @@ fn run_miner(app: AppHandle, settings: RealMiningSettings, stop: Arc<AtomicBool>
 
     shared.clear_job();
     shared.set_connection_status("Stopped");
+    log_message(&app, "Mining stopped");
     emit_stats(&app, &shared, 0.0);
 }
 
@@ -291,14 +313,12 @@ fn run_stratum_connection(
     share_receiver: &Receiver<ShareSubmission>,
 ) -> Result<(), String> {
     let address = format!("{}:{}", settings.pool_host, settings.pool_port);
-    let socket_address = address
+    let socket_addresses = address
         .to_socket_addrs()
         .map_err(|error| format!("DNS failed for {}: {error}", settings.pool_host))?
-        .next()
-        .ok_or_else(|| format!("no address found for {}", settings.pool_host))?;
-
-    let mut stream = TcpStream::connect_timeout(&socket_address, Duration::from_secs(4))
-        .map_err(|error| format!("could not connect to {address}: {error}"))?;
+        .collect::<Vec<_>>();
+    let mut stream = connect_to_pool(&address, &socket_addresses)?;
+    log_message(app, "Connected to pool");
 
     stream
         .set_read_timeout(Some(Duration::from_millis(200)))
@@ -322,6 +342,7 @@ fn run_stratum_connection(
     let mut last_hash_count = shared.hashes.load(Ordering::Relaxed);
 
     shared.set_connection_status("Subscribing");
+    log_message(app, &format!("Subscribing to pool with worker: {}", username));
     while share_receiver.try_recv().is_ok() {}
     write_message(
         &mut stream,
@@ -341,8 +362,13 @@ fn run_stratum_connection(
     )?;
 
     while !shared.stop.load(Ordering::Acquire) {
-        while let Ok(share) = share_receiver.try_recv() {
+        for _ in 0..submission_budget(pending_submissions.len()) {
+            let Ok(share) = share_receiver.try_recv() else {
+                break;
+            };
+
             request_id += 1;
+            log_message(app, &format!("Share submitted: job_id={}, nonce={:08x}", share.job_id, share.nonce));
             write_message(
                 &mut stream,
                 &json!({
@@ -360,14 +386,11 @@ fn run_stratum_connection(
             pending_submissions.insert(request_id);
         }
 
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => return Err("pool closed the connection".into()),
-            Ok(_) if line.len() > MAX_STRATUM_LINE_BYTES => {
-                return Err("pool sent an oversized Stratum message".into())
-            }
-            Ok(_) => {
+        match read_stratum_line(&mut reader) {
+            Ok(None) => return Err("pool closed the connection".into()),
+            Ok(Some(line)) => {
                 handle_server_message(
+                    app,
                     line.trim(),
                     &mut protocol,
                     shared,
@@ -392,6 +415,7 @@ fn run_stratum_connection(
 }
 
 fn handle_server_message(
+    app: &AppHandle,
     line: &str,
     protocol: &mut ProtocolState,
     shared: &Arc<SharedMiningState>,
@@ -409,7 +433,7 @@ fn handle_server_message(
             "mining.set_difficulty" => {
                 let difficulty = value_as_f64(&message["params"][0])
                     .ok_or_else(|| "pool sent an invalid share difficulty".to_string())?;
-                protocol.difficulty = difficulty.max(f64::EPSILON);
+                protocol.difficulty = validate_share_difficulty(difficulty)?;
             }
             "mining.set_extranonce" => {
                 protocol.extranonce1 = message["params"][0].as_str().map(str::to_owned);
@@ -421,8 +445,11 @@ fn handle_server_message(
             }
             "mining.notify" => {
                 if let Some(job) = parse_job(message.get("params"), protocol)? {
+                    let job_id = job.job_id.clone();
+                    let diff = job.share_difficulty;
                     shared.set_job(job);
                     shared.set_connection_status("Mining");
+                    log_message(app, &format!("Job received: id={}, diff={}", job_id, diff));
                 }
             }
             _ => {}
@@ -452,17 +479,22 @@ fn handle_server_message(
         }
 
         shared.set_connection_status("Authorizing");
+        log_message(app, "Subscribed to pool. Authorizing...");
     } else if id == 2 {
         if message.get("result").and_then(Value::as_bool) != Some(true) {
             return Err("pool rejected mining.authorize".into());
         }
 
         shared.set_connection_status("Authorized");
+        log_message(app, "Worker authorized successfully");
     } else if pending_submissions.remove(&id) {
         if message.get("result").and_then(Value::as_bool) == Some(true) {
             shared.accepted_shares.fetch_add(1, Ordering::Relaxed);
+            log_message(app, "Share accepted!");
         } else {
             shared.rejected_shares.fetch_add(1, Ordering::Relaxed);
+            let err_str = message.get("error").map(|e| e.to_string()).unwrap_or_else(|| "unknown error".to_string());
+            log_message(app, &format!("Share rejected. Reason: {}", err_str));
         }
     }
 
@@ -516,8 +548,50 @@ fn parse_job(
         ntime: required_string(params, 7, "ntime")?,
         extranonce1,
         extranonce2_size,
-        share_difficulty: protocol.difficulty.max(f64::EPSILON),
+        share_difficulty: validate_share_difficulty(protocol.difficulty)?,
     }))
+}
+
+fn connect_to_pool(
+    address: &str,
+    socket_addresses: &[std::net::SocketAddr],
+) -> Result<TcpStream, String> {
+    if socket_addresses.is_empty() {
+        return Err(format!("no address found for {address}"));
+    }
+
+    let mut failures = Vec::new();
+    for socket_address in socket_addresses {
+        match TcpStream::connect_timeout(socket_address, Duration::from_secs(4)) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => failures.push(format!("{socket_address}: {error}")),
+        }
+    }
+
+    Err(format!(
+        "could not connect to {address}: {}",
+        failures.join("; ")
+    ))
+}
+
+fn read_stratum_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
+    let mut line = String::new();
+    let bytes_read = reader
+        .take((MAX_STRATUM_LINE_BYTES + 1) as u64)
+        .read_line(&mut line)?;
+
+    if bytes_read == 0 {
+        return Ok(None);
+    }
+
+    if line.len() > MAX_STRATUM_LINE_BYTES {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "pool sent an oversized Stratum message",
+        ));
+    }
+
+    Ok(Some(line))
 }
 
 fn required_string(params: &[Value], index: usize, label: &str) -> Result<String, String> {
@@ -531,6 +605,27 @@ fn value_as_f64(value: &Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_str().and_then(|number| number.parse().ok()))
+}
+
+fn validate_mainnet_address(value: &str) -> Result<(), String> {
+    Address::from_str(value)
+        .map_err(|_| "enter a valid mainnet BTC address before starting real mining".to_string())?
+        .require_network(Network::Bitcoin)
+        .map_err(|_| "enter a valid mainnet BTC address before starting real mining".to_string())?;
+
+    Ok(())
+}
+
+fn validate_share_difficulty(difficulty: f64) -> Result<f64, String> {
+    if !difficulty.is_finite() || difficulty < MIN_SHARE_DIFFICULTY {
+        return Err("pool sent an unsupported share difficulty".into());
+    }
+
+    Ok(difficulty)
+}
+
+fn submission_budget(pending_submissions: usize) -> usize {
+    MAX_SHARE_SUBMISSIONS_PER_TICK.min(MAX_PENDING_SUBMISSIONS.saturating_sub(pending_submissions))
 }
 
 fn validate_extranonce2_size(size: usize) -> Result<usize, String> {
@@ -721,7 +816,13 @@ fn sleep_until_stopped(stop: &AtomicBool, duration: Duration) {
 
 #[cfg(test)]
 mod tests {
-    use super::{difficulty_from_hash, extranonce2_hex, word_swapped_hex};
+    use std::io::{BufReader, Cursor, ErrorKind};
+
+    use super::{
+        difficulty_from_hash, extranonce2_hex, read_stratum_line, validate_mainnet_address,
+        validate_share_difficulty, word_swapped_hex, MAX_PENDING_SUBMISSIONS,
+        MAX_SHARE_SUBMISSIONS_PER_TICK, MAX_STRATUM_LINE_BYTES,
+    };
 
     #[test]
     fn formats_extranonce2_to_pool_width() {
@@ -740,5 +841,37 @@ mod tests {
     #[test]
     fn zero_hash_has_maximum_reported_difficulty() {
         assert!(difficulty_from_hash(&[0; 32]).is_finite());
+    }
+
+    #[test]
+    fn validates_mainnet_bitcoin_address_checksum_and_network() {
+        assert!(validate_mainnet_address("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa").is_ok());
+        assert!(validate_mainnet_address("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb").is_err());
+        assert!(validate_mainnet_address("mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn").is_err());
+    }
+
+    #[test]
+    fn rejects_pathological_share_difficulty() {
+        assert!(validate_share_difficulty(0.0001).is_ok());
+        assert!(validate_share_difficulty(0.0).is_err());
+        assert!(validate_share_difficulty(f64::EPSILON).is_err());
+        assert!(validate_share_difficulty(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_stratum_line_during_read() {
+        let bytes = vec![b'a'; MAX_STRATUM_LINE_BYTES + 1];
+        let mut reader = BufReader::new(Cursor::new(bytes));
+        let error = read_stratum_line(&mut reader).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn caps_share_submission_budget() {
+        assert_eq!(super::submission_budget(0), MAX_SHARE_SUBMISSIONS_PER_TICK);
+        assert_eq!(super::submission_budget(MAX_PENDING_SUBMISSIONS - 1), 1);
+        assert_eq!(super::submission_budget(MAX_PENDING_SUBMISSIONS), 0);
+        assert_eq!(super::submission_budget(MAX_PENDING_SUBMISSIONS + 1), 0);
     }
 }
