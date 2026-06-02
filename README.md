@@ -21,7 +21,8 @@ This project does not promise or guarantee any financial return.
   count
 - Rust Stratum v1 client and cancellable SHA-256d hash loop
 - `Stop` control that signals the hash workers to exit immediately
-- App log directory file logging (`mining.log`) via Tauri resolvers
+- App log directory file logging with a 1 MiB rotation limit (`mining.log` and
+  `mining.log.1`) via Tauri resolvers
 
 BTC Lottery Pet does not hide its process, enable itself at Windows startup,
 accept remote-control commands, or start mining automatically.
@@ -38,6 +39,9 @@ name, pool traffic, and IP address are visible to the selected pool and may be
 visible to networks between your computer and that pool. Only use pool
 operators you trust. The app never asks for or stores a private key or seed
 phrase.
+
+The local mining log intentionally omits the pool username because that value
+contains your public BTC address.
 
 Solo pool availability, difficulty policies, payout behavior, and
 compatibility can change outside this project. Verify the selected pool's
@@ -137,14 +141,27 @@ workload.
 npm install
 ```
 
-## Run locally
+## Stable and development versions
+
+The project keeps two Windows app identities:
+
+| Flavor | Product name | Identifier | Build directory |
+| --- | --- | --- | --- |
+| Stable | `BTC Lottery Pet` | `com.btc-lottery-pet.desktop` | `src-tauri\target\release` |
+| Development | `BTC Lottery Pet Dev` | `com.btc-lottery-pet-dev.desktop` | `src-tauri\target-dev` |
+
+Use the stable build for normal desktop use. The development flavor is for
+local iteration and has a separate app identity, configuration directory, log
+directory, and Rust target directory so it does not overwrite stable files.
+
+## Run the development version
 
 On Windows, load the Visual Studio developer environment so Rust can find
 `link.exe` and the Windows SDK libraries. With the default Build Tools install
 path, run:
 
 ```powershell
-cmd.exe /v:on /d /s /c 'call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && set "PATH=%USERPROFILE%\.cargo\bin;!PATH!" && npm run tauri dev'
+cmd.exe /v:on /d /s /c 'call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && set "PATH=%USERPROFILE%\.cargo\bin;!PATH!" && npm run tauri:dev'
 ```
 
 For a browser-only preview of the React UI:
@@ -156,12 +173,17 @@ npm run dev
 Browser previews can exercise the simulation and settings UI. Real mining runs
 only inside the Tauri app because the Rust backend owns network and hashing.
 
-## Build Windows installers
+## Build the stable Windows installers
 
 ```powershell
-cmd.exe /v:on /d /s /c 'call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && set "PATH=%USERPROFILE%\.cargo\bin;!PATH!" && npm run tauri build'
+cmd.exe /v:on /d /s /c 'call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && set "PATH=%USERPROFILE%\.cargo\bin;!PATH!" && npm run tauri:build-stable'
 ```
 
-Tauri writes Windows bundle artifacts under `src-tauri\target\release\bundle`.
+Tauri writes the stable executable to
+`src-tauri\target\release\btc-lottery-pet.exe` and stable installer bundles
+under `src-tauri\target\release\bundle`.
 The generated installer may download Microsoft's WebView2 bootstrapper when
 the WebView2 runtime is missing from the target computer.
+
+To package the development flavor separately, use `npm run tauri:build-dev`.
+Its Rust outputs are written under `src-tauri\target-dev`.

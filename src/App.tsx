@@ -245,33 +245,64 @@ function App() {
 
   // Fetch Block Height
   useEffect(() => {
+    let disposed = false;
+    let activeController: AbortController | null = null;
+    let requestSequence = 0;
+
     const getBlockHeight = async () => {
+      const requestId = ++requestSequence;
       const urls = [
         "https://mempool.space/api/blocks/tip/height",
         "https://blockstream.info/api/blocks/tip/height",
         "https://blockchain.info/q/getblockcount"
       ];
+
+      activeController?.abort();
+
       for (const url of urls) {
+        if (disposed || requestId !== requestSequence) {
+          return;
+        }
+
+        const controller = new AbortController();
+        activeController = controller;
+        const timeout = window.setTimeout(() => controller.abort(), 5_000);
+
         try {
-          const res = await fetch(url);
+          const res = await fetch(url, { signal: controller.signal });
           if (res.ok) {
             const val = await res.text();
             const num = parseInt(val.trim(), 10);
             if (!isNaN(num) && num > 0) {
-              setBlockHeight(num.toLocaleString());
+              if (!disposed && requestId === requestSequence) {
+                setBlockHeight(num.toLocaleString());
+              }
               return;
             }
           }
         } catch (e) {
           console.warn(`Failed to fetch block height from ${url}:`, e);
+        } finally {
+          window.clearTimeout(timeout);
+          if (activeController === controller) {
+            activeController = null;
+          }
         }
       }
-      setBlockHeight("Offline");
+
+      if (!disposed && requestId === requestSequence) {
+        setBlockHeight("Offline");
+      }
     };
 
-    getBlockHeight();
-    const timer = setInterval(getBlockHeight, 30_000);
-    return () => clearInterval(timer);
+    void getBlockHeight();
+    const timer = window.setInterval(() => void getBlockHeight(), 30_000);
+    return () => {
+      disposed = true;
+      requestSequence += 1;
+      activeController?.abort();
+      window.clearInterval(timer);
+    };
   }, []);
 
   // Simulation Mining Loop

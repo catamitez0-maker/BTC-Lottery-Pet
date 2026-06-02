@@ -26,12 +26,10 @@ const MAX_PENDING_SUBMISSIONS: usize = 128;
 const MAX_SHARE_SUBMISSIONS_PER_TICK: usize = 16;
 const SHARE_QUEUE_CAPACITY: usize = 256;
 const MIN_SHARE_DIFFICULTY: f64 = 1e-12;
+const MAX_LOG_FILE_BYTES: u64 = 1024 * 1024;
 const STATS_EVENT: &str = "mining-stats";
 
 fn log_message(app: &AppHandle, message: &str) {
-    use std::fs::OpenOptions;
-    use std::io::Write;
-
     let _ = app.emit("mining-log", message);
 
     let log_dir = match app.path().app_log_dir() {
@@ -39,22 +37,37 @@ fn log_message(app: &AppHandle, message: &str) {
         Err(_) => return,
     };
 
-    if let Err(_) = std::fs::create_dir_all(&log_dir) {
+    if std::fs::create_dir_all(&log_dir).is_err() {
         return;
     }
 
     let log_file_path = log_dir.join("mining.log");
+    let archived_log_file_path = log_dir.join("mining.log.1");
 
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
     let log_line = format!("[{}] {}\n", now, message);
 
-    if let Ok(mut file) = OpenOptions::new()
+    if should_rotate_log(
+        std::fs::metadata(&log_file_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default(),
+        log_line.len(),
+    ) {
+        let _ = std::fs::remove_file(&archived_log_file_path);
+        let _ = std::fs::rename(&log_file_path, &archived_log_file_path);
+    }
+
+    if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(log_file_path)
     {
         let _ = file.write_all(log_line.as_bytes());
     }
+}
+
+fn should_rotate_log(current_bytes: u64, incoming_bytes: usize) -> bool {
+    current_bytes.saturating_add(incoming_bytes as u64) > MAX_LOG_FILE_BYTES
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -285,7 +298,13 @@ fn run_miner(app: AppHandle, settings: RealMiningSettings, stop: Arc<AtomicBool>
 
     while !stop.load(Ordering::Acquire) {
         shared.set_connection_status("Connecting");
-        log_message(&app, &format!("Connecting to {}:{}", settings.pool_host, settings.pool_port));
+        log_message(
+            &app,
+            &format!(
+                "Connecting to {}:{}",
+                settings.pool_host, settings.pool_port
+            ),
+        );
         emit_stats(&app, &shared, 0.0);
 
         if let Err(error) = run_stratum_connection(&app, &settings, &shared, &share_receiver) {
@@ -295,7 +314,10 @@ fn run_miner(app: AppHandle, settings: RealMiningSettings, stop: Arc<AtomicBool>
 
             shared.clear_job();
             shared.set_connection_status(format!("Retrying: {error}"));
-            log_message(&app, &format!("Connection error: {}. Retrying in 2s...", error));
+            log_message(
+                &app,
+                &format!("Connection error: {}. Retrying in 2s...", error),
+            );
             emit_stats(&app, &shared, 0.0);
             sleep_until_stopped(&stop, Duration::from_secs(2));
         }
@@ -348,14 +370,14 @@ fn run_stratum_connection(
     let mut last_hash_count = shared.hashes.load(Ordering::Relaxed);
 
     shared.set_connection_status("Subscribing");
-    log_message(app, &format!("Subscribing to pool with worker: {}", username));
+    log_message(app, "Subscribing to pool");
     while share_receiver.try_recv().is_ok() {}
     write_message(
         &mut stream,
         &json!({
             "id": 1,
             "method": "mining.subscribe",
-            "params": ["BTC Lottery Pet/0.2.0"]
+            "params": [format!("BTC Lottery Pet/{}", env!("CARGO_PKG_VERSION"))]
         }),
     )?;
     write_message(
@@ -386,7 +408,13 @@ fn run_stratum_connection(
             };
 
             request_id += 1;
-            log_message(app, &format!("Share submitted: job_id={}, nonce={:08x}", share.job_id, share.nonce));
+            log_message(
+                app,
+                &format!(
+                    "Share submitted: job_id={}, nonce={:08x}",
+                    share.job_id, share.nonce
+                ),
+            );
             write_message(
                 &mut stream,
                 &json!({
@@ -511,7 +539,10 @@ fn handle_server_message(
             log_message(app, "Share accepted!");
         } else {
             shared.rejected_shares.fetch_add(1, Ordering::Relaxed);
-            let err_str = message.get("error").map(|e| e.to_string()).unwrap_or_else(|| "unknown error".to_string());
+            let err_str = message
+                .get("error")
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown error".to_string());
             log_message(app, &format!("Share rejected. Reason: {}", err_str));
         }
     }
@@ -891,5 +922,12 @@ mod tests {
         assert_eq!(super::submission_budget(MAX_PENDING_SUBMISSIONS - 1), 1);
         assert_eq!(super::submission_budget(MAX_PENDING_SUBMISSIONS), 0);
         assert_eq!(super::submission_budget(MAX_PENDING_SUBMISSIONS + 1), 0);
+    }
+
+    #[test]
+    fn rotates_log_before_exceeding_size_cap() {
+        assert!(!super::should_rotate_log(0, 1));
+        assert!(!super::should_rotate_log(super::MAX_LOG_FILE_BYTES - 1, 1));
+        assert!(super::should_rotate_log(super::MAX_LOG_FILE_BYTES, 1));
     }
 }

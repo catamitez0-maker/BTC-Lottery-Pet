@@ -1,16 +1,17 @@
 {
   "name": "btc-lottery-pet",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "scripts": {
     "dev": "vite --configLoader runner",
     "build": "tsc && vite build --configLoader runner",
     "preview": "vite preview --configLoader runner",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
+    "tauri:dev": "set \"CARGO_TARGET_DIR=%CD%\\src-tauri\\target-dev\" && tauri dev --config src-tauri/tauri.dev.conf.json",
     "tauri:build": "tauri build",
-    "tauri:build-dev": "tauri build --config src-tauri/tauri.dev.conf.json"
+    "tauri:build-stable": "tauri build",
+    "tauri:build-dev": "set \"CARGO_TARGET_DIR=%CD%\\src-tauri\\target-dev\" && tauri build --config src-tauri/tauri.dev.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
