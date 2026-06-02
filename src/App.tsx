@@ -156,6 +156,7 @@ function App() {
   const [isCoolingDown, setIsCoolingDown] = useState(false);
   const [isLucky, setIsLucky] = useState(false);
   const [isNewBest, setIsNewBest] = useState(false);
+  const [displayMode, setDisplayMode] = useState<"compact" | "detail">("compact");
 
   // App Uptime Timer
   useEffect(() => {
@@ -279,42 +280,41 @@ function App() {
     }, 1800);
 
     const updateStats = () => {
-      setSimulationStats((current) => {
-        const rand = Math.random();
-        const timeStr = new Date().toLocaleTimeString();
+      const rand = Math.random();
+      const timeStr = new Date().toLocaleTimeString();
 
-        if (rand < 0.12) {
-          const isShareAccepted = Math.random() < 0.95;
-          const jobNum = Math.floor(Math.random() * 1000);
-          const nonceHex = Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
+      if (rand < 0.12) {
+        const isShareAccepted = Math.random() < 0.95;
+        const jobNum = Math.floor(Math.random() * 1000);
+        const nonceHex = Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
 
-          setLatestLog(`[${timeStr}] Share submitted: job_id=sim-${jobNum}, nonce=${nonceHex}`);
+        setLatestLog(`[${timeStr}] Share submitted: job_id=sim-${jobNum}, nonce=${nonceHex}`);
 
-          setTimeout(() => {
-            if (isShareAccepted) {
-              setSimAccepted((a) => a + 1);
-              setLatestLog(`[${new Date().toLocaleTimeString()}] Share accepted!`);
-              setIsLucky(true);
-              setTimeout(() => setIsLucky(false), 3000);
-            } else {
-              setSimRejected((r) => r + 1);
-              setLatestLog(`[${new Date().toLocaleTimeString()}] Share rejected. Reason: share target out of range`);
-            }
-          }, 300);
-        } else if (rand < 0.3) {
-          const jobNum = Math.floor(Math.random() * 1000);
-          setLatestLog(`[${timeStr}] Job received: id=sim-${jobNum}, diff=0.01`);
-        }
+        setTimeout(() => {
+          if (isShareAccepted) {
+            setSimAccepted((a) => a + 1);
+            setLatestLog(`[${new Date().toLocaleTimeString()}] Share accepted!`);
+            setIsLucky(true);
+            setTimeout(() => setIsLucky(false), 3000);
+          } else {
+            setSimRejected((r) => r + 1);
+            setLatestLog(`[${new Date().toLocaleTimeString()}] Share rejected. Reason: share target out of range`);
+          }
+        }, 300);
+      } else if (rand < 0.3) {
+        const jobNum = Math.floor(Math.random() * 1000);
+        setLatestLog(`[${timeStr}] Job received: id=sim-${jobNum}, diff=0.01`);
+      }
 
-        const luckyFlash = Math.random() < 0.08;
-        const candidateDifficulty = Math.random() * Math.random() * 4_500;
+      const luckyFlash = Math.random() < 0.08;
+      const candidateDifficulty = Math.random() * Math.random() * 4_500;
+      const addedHashrate = 0.85 + Math.random() * 0.7;
 
-        return {
-          status: luckyFlash ? "Lucky Flash" : "Mining",
-          hashrate: 0.85 + Math.random() * 0.7,
-          bestDifficulty: Math.max(current.bestDifficulty, candidateDifficulty),
-        };
-      });
+      setSimulationStats((current) => ({
+        status: luckyFlash ? "Lucky Flash" : "Mining",
+        hashrate: addedHashrate,
+        bestDifficulty: Math.max(current.bestDifficulty, candidateDifficulty),
+      }));
     };
 
     updateStats();
@@ -503,11 +503,10 @@ function App() {
 
   const isConnectionError =
     isMining &&
-    (blockHeight === "Offline" ||
-      (realModeEnabled &&
-        (realStats.connection_status === "Connecting" ||
-          realStats.connection_status.startsWith("Retrying") ||
-          realStats.connection_status === "Stopped")));
+    realModeEnabled &&
+    (realStats.connection_status.startsWith("Retrying") ||
+      realStats.connection_status.toLowerCase().includes("error") ||
+      realStats.connection_status.toLowerCase().includes("failed"));
 
   let petStatus: PetStatus;
   if (!isMining && !isCoolingDown) {
@@ -538,13 +537,21 @@ function App() {
   ];
 
   return (
-    <main className={`pet-shell ${petStatus === "Lucky Flash" ? "lucky" : ""}`}>
+    <main className={`pet-shell ${displayMode} ${petStatus === "Lucky Flash" ? "lucky" : ""}`}>
       <header className="topbar">
         <div>
           <p className="eyebrow">{realModeEnabled ? "REAL MINING MODE" : "SIMULATION MODE"}</p>
           <h1>BTC Lottery Pet</h1>
         </div>
         <div className="header-actions">
+          <button
+            className={`mode-button ${displayMode === "detail" ? "armed" : ""}`}
+            onClick={() => setDisplayMode((mode) => (mode === "compact" ? "detail" : "compact"))}
+            title="Toggle compact/detail mode"
+            type="button"
+          >
+            {displayMode === "compact" ? "COMPACT" : "DETAIL"}
+          </button>
           <button
             className={`mode-button ${realModeEnabled ? "armed" : ""}`}
             disabled={isMining}
@@ -630,19 +637,23 @@ function App() {
         </button>
       </section>
 
-      <section className="metrics">
-        {metrics.map(([label, value]) => (
-          <article key={label}>
-            <p className="label">{label}</p>
-            <strong title={value}>{value}</strong>
-          </article>
-        ))}
-      </section>
+      {displayMode === "detail" && (
+        <section className="metrics">
+          {metrics.map(([label, value]) => (
+            <article key={label}>
+              <p className="label">{label}</p>
+              <strong title={value}>{value}</strong>
+            </article>
+          ))}
+        </section>
+      )}
 
-      <div className="log-ticker">
-        <span className="log-label">LOG:</span>
-        <span className="log-text" title={latestLog}>{latestLog}</span>
-      </div>
+      {displayMode === "detail" && (
+        <div className="log-ticker">
+          <span className="log-label">LOG:</span>
+          <span className="log-text" title={latestLog}>{latestLog}</span>
+        </div>
+      )}
 
       <footer>
         <span className={`dot ${realModeEnabled ? "armed" : ""}`} />

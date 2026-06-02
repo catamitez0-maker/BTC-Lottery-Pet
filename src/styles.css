@@ -119,6 +119,7 @@ h1 {
   width: 60px;
   height: 46px;
   position: relative;
+  transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1), height 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* Cabinet chassis */
@@ -133,7 +134,7 @@ h1 {
   padding: 2px;
   position: relative;
   box-shadow: 0 3px 8px rgba(0, 0, 0, 0.45);
-  transition: all 0.2s ease;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* Lights at the top */
@@ -198,6 +199,7 @@ h1 {
   color: #f7931a;
   overflow: hidden;
   position: relative;
+  transition: height 0.25s cubic-bezier(0.4, 0, 0.2, 1), font-size 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* Active spinning container */
@@ -225,6 +227,7 @@ h1 {
   height: 13px;
   color: #f7931a;
   text-shadow: 0 0 2px rgba(247, 147, 26, 0.7);
+  transition: height 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* Decorative buttons at the bottom */
@@ -619,4 +622,65 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: 8.5px;
+}
+
+/* Compact mode styles */
+.pet-shell.compact {
+  grid-template-rows: auto 1fr auto;
+}
+
+.pet-shell.compact .status-row {
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 15px;
+  padding: 18px 0;
+  height: 100%;
+}
+
+.pet-shell.compact .pet-machine-container {
+  width: 110px;
+  height: 84px;
+}
+
+.pet-shell.compact .pet-expression {
+  font-size: 13px;
+  text-shadow: 0 0 4px #00ff66;
+}
+
+.pet-shell.compact .slot-reel {
+  height: 24px;
+  font-size: 12px;
+}
+
+.pet-shell.compact .reel-strip span {
+  height: 24px;
+}
+
+.pet-shell.compact .pet-lights {
+  margin-bottom: 4px;
+}
+
+.pet-shell.compact .light {
+  width: 5px;
+  height: 5px;
+}
+
+.pet-shell.compact .decor-btn {
+  width: 4px;
+  height: 4px;
+}
+
+.pet-shell.compact .status-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.pet-shell.compact .control-button {
+  margin: 0;
+  min-width: 90px;
+  padding: 9px 16px;
+  font-size: 12px;
 }

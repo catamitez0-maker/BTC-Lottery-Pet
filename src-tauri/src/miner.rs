@@ -16,7 +16,7 @@ use bitcoin::{Address, Network};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 const DIFF_ONE_TARGET: f64 =
     26_959_535_291_011_309_493_156_476_344_723_991_336_010_898_738_574_164_086_137_773_096_960.0;
@@ -34,10 +34,16 @@ fn log_message(app: &AppHandle, message: &str) {
 
     let _ = app.emit("mining-log", message);
 
-    if let Err(e) = std::fs::create_dir_all("logs") {
-        eprintln!("Failed to create logs directory: {}", e);
+    let log_dir = match app.path().app_log_dir() {
+        Ok(dir) => dir,
+        Err(_) => return,
+    };
+
+    if let Err(_) = std::fs::create_dir_all(&log_dir) {
         return;
     }
+
+    let log_file_path = log_dir.join("mining.log");
 
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
     let log_line = format!("[{}] {}\n", now, message);
@@ -45,7 +51,7 @@ fn log_message(app: &AppHandle, message: &str) {
     if let Ok(mut file) = OpenOptions::new()
         .create(true)
         .append(true)
-        .open("logs/mining.log")
+        .open(log_file_path)
     {
         let _ = file.write_all(log_line.as_bytes());
     }
