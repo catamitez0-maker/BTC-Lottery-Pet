@@ -11,7 +11,8 @@ This project does not promise or guarantee any financial return.
 
 ## Features
 
-- 320x220 desktop pet window
+- 360x260 desktop pet window
+- Toggleable **Compact Mode** (default scaled-up desktop pet ornament with a mini stats line) and **Detail Mode** (complete metrics grid and log ticker)
 - Always-on-top window with a user-controlled `PIN` / `FREE` toggle
 - System tray icon with `Show BTC Lottery Pet` and `Quit`
 - Default simulation mode with locally generated stats
@@ -20,6 +21,7 @@ This project does not promise or guarantee any financial return.
   count
 - Rust Stratum v1 client and cancellable SHA-256d hash loop
 - `Stop` control that signals the hash workers to exit immediately
+- App log directory file logging (`mining.log`) via Tauri resolvers
 
 BTC Lottery Pet does not hide its process, enable itself at Windows startup,
 accept remote-control commands, or start mining automatically.

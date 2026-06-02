@@ -550,7 +550,7 @@ function App() {
             title="Toggle compact/detail mode"
             type="button"
           >
-            {displayMode === "compact" ? "COMPACT" : "DETAIL"}
+            {displayMode === "compact" ? "DETAIL" : "PET"}
           </button>
           <button
             className={`mode-button ${realModeEnabled ? "armed" : ""}`}
@@ -622,6 +622,17 @@ function App() {
             </div>
           </div>
         </div>
+
+        {displayMode === "compact" && (
+          <div className="mini-stats-line">
+            <span>H: {realModeEnabled ? formatHashrate(realStats.hashrate) : `${simulationStats.hashrate.toFixed(2)} MH/s`}</span>
+            <span className="divider">|</span>
+            <span>D: {formatDifficulty(realModeEnabled ? realStats.best_difficulty : simulationStats.bestDifficulty)}</span>
+            <span className="divider">|</span>
+            <span>B: {blockHeight}</span>
+          </div>
+        )}
+
         <div className="status-copy">
           <p className="label">STATUS</p>
           <p className={`status ${petStatus === "Lucky Flash" ? "flash" : ""}`} title={petStatus}>

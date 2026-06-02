@@ -367,7 +367,19 @@ fn run_stratum_connection(
         }),
     )?;
 
+    let mut last_job_received = Instant::now();
+    let mut debug_hint_logged = false;
+
     while !shared.stop.load(Ordering::Acquire) {
+        let has_job = shared.job.read().unwrap().is_some();
+        if has_job {
+            last_job_received = Instant::now();
+            debug_hint_logged = false;
+        } else if !debug_hint_logged && last_job_received.elapsed() >= Duration::from_secs(20) {
+            log_message(app, "[Warning] No jobs received yet. Verify your pool address, port, BTC address, and network firewall settings.");
+            debug_hint_logged = true;
+        }
+
         for _ in 0..submission_budget(pending_submissions.len()) {
             let Ok(share) = share_receiver.try_recv() else {
                 break;

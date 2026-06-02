@@ -684,3 +684,23 @@ select {
   padding: 9px 16px;
   font-size: 12px;
 }
+
+.mini-stats-line {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 7px;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 9px;
+  color: #a5abb4;
+  opacity: 0.72;
+  margin-top: -6px;
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
+.mini-stats-line .divider {
+  color: #f7931a;
+  font-weight: 800;
+  opacity: 0.55;
+}
