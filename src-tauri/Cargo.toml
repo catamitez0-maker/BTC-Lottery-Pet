@@ -1,0 +1,20 @@
+[package]
+name = "btc-lottery-pet"
+version = "0.2.0"
+description = "An opt-in BTC lottery miner and simulation desktop pet"
+authors = ["BTC Lottery Pet"]
+edition = "2021"
+
+[lib]
+name = "btc_lottery_pet_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", features = ["tray-icon"] }

@@ -1,0 +1,9 @@
+{
+  "btc_address": "",
+  "pool_host": "pool.nerdminers.org",
+  "pool_port": 3333,
+  "worker_name": "btc-lottery-pet",
+  "cpu_limit_percent": 10,
+  "cpu_threads": 1,
+  "real_mining_enabled": false
+}
