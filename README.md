@@ -14,7 +14,7 @@ This project does not promise or guarantee any financial return.
 - 360x260 desktop pet window
 - Toggleable **Compact Mode** (default scaled-up desktop pet ornament with a mini stats line) and **Detail Mode** (complete metrics grid and log ticker)
 - Always-on-top window with a user-controlled `PIN` / `FREE` toggle
-- System tray icon with `Show BTC Lottery Pet` and `Quit`
+- System tray icon with `Show`, `Hide`, `Open Logs`, and `Quit`
 - Default simulation mode with locally generated stats
 - Explicitly enabled real mining mode with a CPU-use warning
 - User-controlled BTC address, pool host, pool port, worker name, and CPU thread
@@ -25,8 +25,11 @@ This project does not promise or guarantee any financial return.
   again focuses its existing window
 - Rust Stratum v1 client and cancellable SHA-256d hash loop
 - `Stop` control that signals the hash workers to exit immediately
+- Jackpot / block-candidate detection when a header hash meets the network
+  target from the current Stratum job's `nbits`
 - App log directory file logging with a 1 MiB rotation limit (`mining.log` and
-  `mining.log.1`) via Tauri resolvers
+  `mining.log` / `mining.log.1`) plus `found_block.json` for a block
+  candidate event
 
 BTC Lottery Pet does not hide its process, enable itself at Windows startup,
 accept remote-control commands, or start mining automatically.
@@ -88,10 +91,18 @@ The Rust backend owns all real mining work:
 6. Send qualifying shares with `mining.submit`.
 7. Emit only UI statistics: hashrate, accepted shares, rejected shares, best
    difficulty, current job ID, and connection status.
+8. Compare each candidate header hash against the network target derived from
+   `nbits`; if it meets that target, emit a local `block-found` event, write
+   `found_block.json`, and keep the normal share-submission path active.
 
 The current client is intentionally small. It supports plain Stratum v1 TCP,
 not Stratum TLS, Stratum v2, proxy mode, failover pools, remote management, or
 profit-switching.
+
+The block-candidate record contains job ID, nonce, ntime, extranonce2, block
+hash, best difficulty estimate, timestamp, and pool host/port. It intentionally
+does not include the BTC address, private keys, seed phrases, or any remote
+control data.
 
 To keep an untrusted or misconfigured pool from consuming unbounded local
 resources, the client caps each Stratum line at 1 MiB, keeps at most 128
@@ -209,6 +220,17 @@ Single-instance protection applies within each identifier. Starting
 creating another one. Stable and development builds deliberately use different
 identifiers, so they can still run side by side for testing.
 
+## Tray and logs
+
+Closing the pet window with `X` hides it to the system tray. It does not start
+or stop mining by itself. Use the tray `Show` item or left-click the tray icon
+to show the window again. Use `Quit` from the tray menu to exit the app.
+
+The tray `Open Logs` item and the Detail Mode `OPEN LOGS` button open the
+app-specific log folder. The Detail Mode `COPY LOG PATH` button copies that
+local log folder path. The regular mining log is `mining.log`; if a block
+candidate is detected, the event is also saved as `found_block.json`.
+
 ## Run and build commands
 
 Use exactly one of these commands for the task at hand:
@@ -218,6 +240,11 @@ Use exactly one of these commands for the task at hand:
 | `npm run tauri:dev` | Recommended development desktop app. Starts Vite for Tauri and opens one `BTC Lottery Pet Dev` desktop window. It does not ask Vite to open a browser. |
 | `npm run dev` | Browser-only React preview at `http://localhost:1420`. It does not launch Tauri. |
 | `npm run tauri:build` | Stable Windows package build for `BTC Lottery Pet`. |
+
+Release builds use the Windows GUI subsystem, so the packaged app should not
+open an extra black console window next to the pet window. `npm run tauri:dev`
+is different: it runs from a development terminal, and that terminal staying
+open while the dev app runs is normal.
 
 If you run `npm run dev` and `npm run tauri:dev` at the same time, you may see
 a browser preview and a Tauri desktop window. Other common sources of an
@@ -259,3 +286,17 @@ the WebView2 runtime is missing from the target computer.
 `npm run tauri:build-stable` remains an alias for `npm run tauri:build`.
 To package the development flavor separately, use `npm run tauri:build-dev`.
 Its Rust outputs are written under `src-tauri\target-dev`.
+
+## Release candidate checks
+
+For the v0.4 release candidate, verify:
+
+1. `cargo test --manifest-path src-tauri\Cargo.toml` passes, including the
+   compact `nbits` target and block-candidate event tests.
+2. `npm run build` passes TypeScript and Vite production builds.
+3. `npm run tauri:build` produces the stable Windows executable and installer.
+4. The release executable uses the Windows GUI subsystem and should not open an
+   extra black console window. The development command `npm run tauri:dev` can
+   still keep its development terminal open; that is expected.
+5. Detail Mode `OPEN LOGS` opens the local app log folder, and
+   `COPY LOG PATH` copies that folder path.

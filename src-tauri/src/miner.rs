@@ -28,6 +28,7 @@ const SHARE_QUEUE_CAPACITY: usize = 256;
 const MIN_SHARE_DIFFICULTY: f64 = 1e-12;
 const MAX_LOG_FILE_BYTES: u64 = 1024 * 1024;
 const STATS_EVENT: &str = "mining-stats";
+const BLOCK_FOUND_EVENT: &str = "block-found";
 
 fn log_message(app: &AppHandle, message: &str) {
     let _ = app.emit("mining-log", message);
@@ -140,6 +141,18 @@ pub struct MiningStats {
     pub connection_status: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct FoundBlockEvent {
+    pub job_id: String,
+    pub nonce: String,
+    pub ntime: String,
+    pub extranonce2: String,
+    pub hash: String,
+    pub difficulty: f64,
+    pub timestamp: String,
+    pub pool: String,
+}
+
 impl MiningStats {
     fn stopped() -> Self {
         Self {
@@ -195,6 +208,7 @@ struct JobTemplate {
     merkle_branches: Vec<String>,
     version: String,
     nbits: String,
+    network_target: [u8; 32],
     ntime: String,
     extranonce1: String,
     extranonce2_size: usize,
@@ -294,7 +308,7 @@ struct ProtocolState {
 fn run_miner(app: AppHandle, settings: RealMiningSettings, stop: Arc<AtomicBool>) {
     let shared = Arc::new(SharedMiningState::new(Arc::clone(&stop)));
     let (share_sender, share_receiver) = mpsc::sync_channel(SHARE_QUEUE_CAPACITY);
-    let workers = spawn_hash_workers(&settings, &shared, &share_sender);
+    let workers = spawn_hash_workers(&settings, &shared, &share_sender, &app);
 
     while !stop.load(Ordering::Acquire) {
         shared.set_connection_status("Connecting");
@@ -585,6 +599,9 @@ fn parse_job(
         return Err("pool sent too many merkle branches".into());
     }
 
+    let nbits = required_string(params, 6, "nbits")?;
+    let network_target = target_from_nbits(&nbits)?;
+
     Ok(Some(JobTemplate {
         generation: 0,
         job_id: required_string(params, 0, "job id")?,
@@ -593,7 +610,8 @@ fn parse_job(
         coinbase2: required_string(params, 3, "coinbase suffix")?,
         merkle_branches,
         version: required_string(params, 5, "version")?,
-        nbits: required_string(params, 6, "nbits")?,
+        nbits,
+        network_target,
         ntime: required_string(params, 7, "ntime")?,
         extranonce1,
         extranonce2_size,
@@ -691,16 +709,30 @@ fn spawn_hash_workers(
     settings: &RealMiningSettings,
     shared: &Arc<SharedMiningState>,
     share_sender: &SyncSender<ShareSubmission>,
+    app: &AppHandle,
 ) -> Vec<thread::JoinHandle<()>> {
+    let pool = format!("{}:{}", settings.pool_host, settings.pool_port);
+
     (0..settings.cpu_threads)
         .map(|worker_index| {
             let shared = Arc::clone(shared);
             let share_sender = share_sender.clone();
             let worker_count = settings.cpu_threads;
+            let worker_app = app.clone();
+            let worker_pool = pool.clone();
 
             thread::Builder::new()
                 .name(format!("btc-lottery-hash-{worker_index}"))
-                .spawn(move || hash_loop(worker_index, worker_count, shared, share_sender))
+                .spawn(move || {
+                    hash_loop(
+                        worker_index,
+                        worker_count,
+                        shared,
+                        share_sender,
+                        worker_app,
+                        worker_pool,
+                    )
+                })
                 .expect("failed to start hash worker")
         })
         .collect()
@@ -711,6 +743,8 @@ fn hash_loop(
     worker_count: usize,
     shared: Arc<SharedMiningState>,
     share_sender: SyncSender<ShareSubmission>,
+    app: AppHandle,
+    pool: String,
 ) {
     while !shared.stop.load(Ordering::Acquire) {
         let Some(job) = shared.job.read().unwrap().clone() else {
@@ -742,6 +776,12 @@ fn hash_loop(
                 let difficulty = difficulty_from_hash(&hash);
                 shared.hashes.fetch_add(1, Ordering::Relaxed);
                 shared.update_best_difficulty(difficulty);
+
+                if hash_meets_network_target(&hash, &job.network_target) {
+                    let event =
+                        found_block_event(&job, nonce, &extranonce2, &hash, difficulty, &pool);
+                    record_block_candidate(&app, &event);
+                }
 
                 if difficulty >= job.share_difficulty {
                     let submission = ShareSubmission {
@@ -843,6 +883,104 @@ fn difficulty_from_hash(hash: &[u8; 32]) -> f64 {
     DIFF_ONE_TARGET / numeric_hash
 }
 
+fn target_from_nbits(nbits: &str) -> Result<[u8; 32], String> {
+    let compact = decode_hex(nbits)?;
+    if compact.len() != 4 {
+        return Err("pool sent invalid compact target width".into());
+    }
+
+    if compact[1] & 0x80 != 0 {
+        return Err("pool sent a negative compact target".into());
+    }
+
+    let exponent = compact[0] as usize;
+    let mantissa = [compact[1], compact[2], compact[3]];
+    let mut target = [0_u8; 32];
+
+    if exponent == 0 {
+        return Ok(target);
+    }
+
+    if exponent <= 3 {
+        let shift = 8 * (3 - exponent);
+        let value = u32::from_be_bytes([0, mantissa[0], mantissa[1], mantissa[2]]) >> shift;
+        target[28..32].copy_from_slice(&value.to_be_bytes());
+        return Ok(target);
+    }
+
+    if exponent > 32 {
+        return Err("pool sent a compact target above uint256".into());
+    }
+
+    let start = 32 - exponent;
+    target[start..start + 3].copy_from_slice(&mantissa);
+    Ok(target)
+}
+
+fn hash_meets_network_target(hash: &[u8; 32], target: &[u8; 32]) -> bool {
+    for (hash_byte, target_byte) in hash.iter().rev().zip(target.iter()) {
+        if hash_byte < target_byte {
+            return true;
+        }
+
+        if hash_byte > target_byte {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn block_hash_hex(hash: &[u8; 32]) -> String {
+    let bytes = hash.iter().rev().copied().collect::<Vec<_>>();
+    hex::encode(bytes)
+}
+
+fn found_block_event(
+    job: &JobTemplate,
+    nonce: u32,
+    extranonce2: &str,
+    hash: &[u8; 32],
+    difficulty: f64,
+    pool: &str,
+) -> FoundBlockEvent {
+    FoundBlockEvent {
+        job_id: job.job_id.clone(),
+        nonce: format!("{nonce:08x}"),
+        ntime: job.ntime.clone(),
+        extranonce2: extranonce2.to_owned(),
+        hash: block_hash_hex(hash),
+        difficulty,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        pool: pool.to_owned(),
+    }
+}
+
+fn record_block_candidate(app: &AppHandle, event: &FoundBlockEvent) {
+    log_message(app, "BLOCK CANDIDATE FOUND!");
+    let _ = app.emit(BLOCK_FOUND_EVENT, event);
+
+    let Ok(log_dir) = app.path().app_log_dir() else {
+        return;
+    };
+
+    if std::fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
+
+    let path = log_dir.join("found_block.json");
+    match serde_json::to_vec_pretty(event) {
+        Ok(payload) => {
+            if let Err(error) = std::fs::write(&path, payload) {
+                log_message(app, &format!("Failed to save found_block.json: {error}"));
+            }
+        }
+        Err(error) => {
+            log_message(app, &format!("Failed to encode found_block.json: {error}"));
+        }
+    }
+}
+
 fn write_message(stream: &mut TcpStream, message: &Value) -> Result<(), String> {
     let mut payload = serde_json::to_vec(message)
         .map_err(|error| format!("failed to encode Stratum JSON: {error}"))?;
@@ -868,8 +1006,9 @@ mod tests {
     use std::io::{BufReader, Cursor, ErrorKind};
 
     use super::{
-        difficulty_from_hash, extranonce2_hex, read_stratum_line, validate_mainnet_address,
-        validate_share_difficulty, word_swapped_hex, RealMiningSettings, MAX_PENDING_SUBMISSIONS,
+        difficulty_from_hash, extranonce2_hex, found_block_event, hash_meets_network_target,
+        read_stratum_line, target_from_nbits, validate_mainnet_address, validate_share_difficulty,
+        word_swapped_hex, JobTemplate, RealMiningSettings, MAX_PENDING_SUBMISSIONS,
         MAX_SHARE_SUBMISSIONS_PER_TICK, MAX_STRATUM_LINE_BYTES,
     };
 
@@ -890,6 +1029,58 @@ mod tests {
     #[test]
     fn zero_hash_has_maximum_reported_difficulty() {
         assert!(difficulty_from_hash(&[0; 32]).is_finite());
+    }
+
+    #[test]
+    fn expands_compact_nbits_to_network_target() {
+        let target = target_from_nbits("1d00ffff").unwrap();
+
+        assert_eq!(
+            hex::encode(target),
+            "00000000ffff0000000000000000000000000000000000000000000000000000"
+        );
+    }
+
+    #[test]
+    fn compares_hashes_against_network_target() {
+        let target = target_from_nbits("1d00ffff").unwrap();
+
+        assert!(hash_meets_network_target(&[0; 32], &target));
+        assert!(!hash_meets_network_target(&[0xff; 32], &target));
+    }
+
+    #[test]
+    fn found_block_event_uses_pool_metadata_without_address() {
+        let job = JobTemplate {
+            generation: 1,
+            job_id: "job-7".into(),
+            prev_hash: String::new(),
+            coinbase1: String::new(),
+            coinbase2: String::new(),
+            merkle_branches: Vec::new(),
+            version: "20000000".into(),
+            nbits: "1d00ffff".into(),
+            network_target: target_from_nbits("1d00ffff").unwrap(),
+            ntime: "5f5e1000".into(),
+            extranonce1: "abcd".into(),
+            extranonce2_size: 4,
+            share_difficulty: 1.0,
+        };
+
+        let event = found_block_event(
+            &job,
+            0x1234abcd,
+            "00000001",
+            &[0; 32],
+            42.0,
+            "public-pool.io:21496",
+        );
+        let serialized = serde_json::to_string(&event).unwrap();
+
+        assert_eq!(event.job_id, "job-7");
+        assert_eq!(event.nonce, "1234abcd");
+        assert!(serialized.contains("public-pool.io:21496"));
+        assert!(!serialized.contains("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"));
     }
 
     #[test]

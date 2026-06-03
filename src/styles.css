@@ -309,6 +309,23 @@ h1 {
   animation: flash-led 0.25s step-end infinite;
 }
 
+/* JACKPOT: network block target candidate */
+.jackpot .pet-machine {
+  animation: jackpot-pulse 0.24s ease-in-out infinite;
+  border-color: #ffd700;
+  box-shadow: 0 0 18px rgba(255, 215, 0, 0.72), inset 0 0 8px rgba(255, 215, 0, 0.3);
+  transform: translateY(-2px);
+}
+
+.jackpot .light {
+  background: #ffd700;
+  animation: jackpot-led 0.18s step-end infinite;
+}
+
+.jackpot .pet-screen {
+  border-color: rgba(255, 215, 0, 0.55);
+}
+
 /* NEW BEST DIFF: Excitement jumping, glowing green */
 .new-best-diff .pet-machine {
   animation: jump 0.5s ease-in-out infinite;
@@ -393,6 +410,16 @@ h1 {
   50% { box-shadow: 0 0 16px #ff007f, inset 0 0 6px #ff007f; border-color: #ff007f; }
 }
 
+@keyframes jackpot-pulse {
+  0%, 100% { filter: brightness(1.1); transform: translateY(-1px) scale(1.01); }
+  50% { filter: brightness(1.42); transform: translateY(-3px) scale(1.05); }
+}
+
+@keyframes jackpot-led {
+  0%, 100% { background: #ffd700; box-shadow: 0 0 7px #ffd700; }
+  50% { background: #ffffff; box-shadow: 0 0 9px #ffffff; }
+}
+
 @keyframes overdrive-pulse {
   0%, 100% { filter: brightness(1); transform: scale(1); }
   50% { filter: brightness(1.24); transform: scale(1.035); }
@@ -444,6 +471,35 @@ h1 {
   gap: 4px;
   grid-template-columns: 1fr 1fr;
   padding-bottom: 2px;
+}
+
+.real-status-strip {
+  background: rgba(247, 147, 26, 0.07);
+  border: 1px solid rgba(247, 147, 26, 0.18);
+  border-radius: 6px;
+  display: grid;
+  gap: 3px 8px;
+  grid-template-columns: 1fr 1fr;
+  margin-top: 1px;
+  padding: 4px 6px;
+}
+
+.real-status-strip span {
+  color: #c1c5cc;
+  display: block;
+  font: 8px "Cascadia Mono", Consolas, monospace;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.real-status-strip b {
+  color: #f7931a;
+  display: inline-block;
+  font: 700 7px Inter, system-ui, sans-serif;
+  letter-spacing: 0.06em;
+  margin-right: 4px;
 }
 
 article {
@@ -543,6 +599,46 @@ h2 {
   font-size: 11px;
   line-height: 1.45;
   margin: 0 0 11px;
+}
+
+.jackpot-card {
+  border-color: rgba(255, 215, 0, 0.48);
+  box-shadow: 0 0 24px rgba(255, 215, 0, 0.2), 0 10px 25px rgba(0, 0, 0, 0.35);
+  max-width: 320px;
+  padding: 13px;
+}
+
+.jackpot-card h2 {
+  color: #ffd700;
+  letter-spacing: 0.08em;
+}
+
+.jackpot-card dl {
+  display: grid;
+  gap: 4px 7px;
+  grid-template-columns: 1fr 1fr;
+  margin: 0 0 10px;
+}
+
+.jackpot-card dl div:last-child {
+  grid-column: 1 / -1;
+}
+
+.jackpot-card dt {
+  color: #8c929d;
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.jackpot-card dd {
+  color: #f0ead4;
+  font: 9px "Cascadia Mono", Consolas, monospace;
+  margin: 1px 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .panel-actions {
@@ -712,9 +808,26 @@ select {
 
 .log-text {
   font-family: "Cascadia Mono", Consolas, monospace;
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: 8.5px;
+}
+
+.log-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+.mini-button {
+  background: #2b3039;
+  border-radius: 4px;
+  color: #c6cad1;
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  padding: 3px 5px;
 }
 
 /* Compact mode styles */

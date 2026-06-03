@@ -1,6 +1,6 @@
 mod miner;
 
-use std::{fs, path::PathBuf, thread};
+use std::{fs, path::PathBuf, process::Command, thread};
 
 use miner::{MiningController, RealMiningSettings};
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,7 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, State, WebviewWindow,
+    AppHandle, Manager, State, WebviewWindow, WindowEvent,
 };
 
 const DEFAULT_CONFIG: &str = include_str!("../../config.json");
@@ -262,6 +262,16 @@ fn stop_real_mining(app: AppHandle, state: State<'_, MiningController>) {
 }
 
 #[tauri::command]
+fn get_log_path(app: AppHandle) -> Result<String, String> {
+    Ok(ensure_log_dir(&app)?.display().to_string())
+}
+
+#[tauri::command]
+fn open_log_folder(app: AppHandle) -> Result<(), String> {
+    open_log_folder_impl(&app)
+}
+
+#[tauri::command]
 fn set_window_always_on_top(window: WebviewWindow, always_on_top: bool) -> Result<(), String> {
     window
         .set_always_on_top(always_on_top)
@@ -274,6 +284,42 @@ fn show_main_window(app: &AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+fn hide_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+}
+
+fn ensure_log_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let log_dir = app
+        .path()
+        .app_log_dir()
+        .map_err(|error| format!("failed to locate log folder: {error}"))?;
+    fs::create_dir_all(&log_dir)
+        .map_err(|error| format!("failed to create log folder: {error}"))?;
+    Ok(log_dir)
+}
+
+fn open_log_folder_impl(app: &AppHandle) -> Result<(), String> {
+    let log_dir = ensure_log_dir(app)?;
+
+    #[cfg(windows)]
+    let mut command = Command::new("explorer");
+
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = Command::new("xdg-open");
+
+    command
+        .arg(&log_dir)
+        .spawn()
+        .map_err(|error| format!("failed to open log folder: {error}"))?;
+
+    Ok(())
 }
 
 fn tray_icon() -> Image<'static> {
@@ -321,8 +367,10 @@ pub fn run() {
             reset_saved_config_to_safe_defaults(app.handle()).map_err(std::io::Error::other)?;
 
             let show = MenuItem::with_id(app, "show", "Show BTC Lottery Pet", true, None::<&str>)?;
+            let hide = MenuItem::with_id(app, "hide", "Hide to Tray", true, None::<&str>)?;
+            let open_logs = MenuItem::with_id(app, "open_logs", "Open Logs", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &hide, &open_logs, &quit])?;
 
             TrayIconBuilder::new()
                 .icon(tray_icon())
@@ -331,6 +379,10 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "show" => show_main_window(app),
+                    "hide" => hide_main_window(app),
+                    "open_logs" => {
+                        let _ = open_log_folder_impl(app);
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -348,6 +400,12 @@ pub fn run() {
 
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_config,
@@ -356,6 +414,8 @@ pub fn run() {
             run_gpu_benchmark,
             start_real_mining,
             stop_real_mining,
+            get_log_path,
+            open_log_folder,
             set_window_always_on_top
         ])
         .run(tauri::generate_context!())

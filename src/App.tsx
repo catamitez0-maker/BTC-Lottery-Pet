@@ -2,7 +2,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useState, useRef } from "react";
 
-type PetStatus = "Sleeping" | "Mining" | "Overdrive" | "Lucky Flash" | "Cooling Down" | "Connection Error" | "New Best Diff";
+type PetStatus = "Sleeping" | "Mining" | "Overdrive" | "Lucky Flash" | "Cooling Down" | "Connection Error" | "New Best Diff" | "Jackpot";
 type ComputeMode = "cpu" | "gpu_sim" | "gpu_benchmark" | "gpu_real_experimental";
 
 interface AppConfig {
@@ -54,6 +54,17 @@ interface RealMiningStats {
   best_difficulty: number;
   current_job_id: string;
   connection_status: string;
+}
+
+interface BlockFoundEvent {
+  job_id: string;
+  nonce: string;
+  ntime: string;
+  extranonce2: string;
+  hash: string;
+  difficulty: number;
+  timestamp: string;
+  pool: string;
 }
 
 const fallbackConfig: AppConfig = {
@@ -144,6 +155,8 @@ function getPetExpression(status: PetStatus): string {
       return "( ~_~ )";
     case "Connection Error":
       return "( x_x )";
+    case "Jackpot":
+      return "( ₿∀₿ )";
     case "Lucky Flash":
       return "( ★∀★ )";
     case "New Best Diff":
@@ -165,6 +178,8 @@ function getSlotChar(status: PetStatus, index: number): string {
       return ["C", "O", "L"][index];
     case "Connection Error":
       return ["E", "R", "R"][index];
+    case "Jackpot":
+      return ["₿", "₿", "₿"][index];
     case "Lucky Flash":
       return ["₿", "₿", "₿"][index];
     case "New Best Diff":
@@ -198,6 +213,9 @@ function App() {
   const [simRejected, setSimRejected] = useState(0);
   const [blockHeight, setBlockHeight] = useState("Loading...");
   const [latestLog, setLatestLog] = useState("[System] Ready");
+  const [lastShare, setLastShare] = useState("None");
+  const [blockFound, setBlockFound] = useState<BlockFoundEvent | null>(null);
+  const [showJackpot, setShowJackpot] = useState(false);
 
   const [isCoolingDown, setIsCoolingDown] = useState(false);
   const [isLucky, setIsLucky] = useState(false);
@@ -289,7 +307,13 @@ function App() {
     let unlisten = () => {};
 
     listen<string>("mining-log", (event) => {
-      setLatestLog(event.payload);
+      const message = event.payload;
+      setLatestLog(message);
+
+      const lowerMessage = message.toLowerCase();
+      if (lowerMessage.includes("share submitted") || lowerMessage.includes("share accepted") || lowerMessage.includes("share rejected")) {
+        setLastShare(message.replace(/^\[[^\]]+\]\s*/, ""));
+      }
     })
       .then((cleanup) => {
         unlisten = cleanup;
@@ -297,6 +321,29 @@ function App() {
       .catch((error) => {
         if (runningInTauri) {
           setErrorMessage(`Could not listen for mining logs: ${formatError(error)}`);
+        }
+      });
+
+    return () => unlisten();
+  }, []);
+
+  // Listen to Block Candidate Events
+  useEffect(() => {
+    let unlisten = () => {};
+
+    listen<BlockFoundEvent>("block-found", (event) => {
+      setBlockFound(event.payload);
+      setShowJackpot(true);
+      setIsLucky(false);
+      setIsNewBest(false);
+      setLatestLog(`[Jackpot] Block candidate found: job=${event.payload.job_id}, hash=${event.payload.hash}`);
+    })
+      .then((cleanup) => {
+        unlisten = cleanup;
+      })
+      .catch((error) => {
+        if (runningInTauri) {
+          setErrorMessage(`Could not listen for block candidate events: ${formatError(error)}`);
         }
       });
 
@@ -499,6 +546,9 @@ function App() {
     setErrorMessage("");
     setMiningUptime(0);
     setIsCoolingDown(false);
+    setBlockFound(null);
+    setShowJackpot(false);
+    setLastShare("None");
     if (coolingDownTimerRef.current) {
       clearTimeout(coolingDownTimerRef.current);
       coolingDownTimerRef.current = null;
@@ -695,6 +745,36 @@ function App() {
     }
   };
 
+  const openLogs = async () => {
+    setErrorMessage("");
+
+    try {
+      await invoke("open_log_folder");
+    } catch (error) {
+      if (runningInTauri) {
+        setErrorMessage(`Could not open logs: ${formatError(error)}`);
+      } else {
+        setErrorMessage("Log folder is available in the desktop app.");
+      }
+    }
+  };
+
+  const copyLogPath = async () => {
+    setErrorMessage("");
+
+    try {
+      const path = await invoke<string>("get_log_path");
+      await navigator.clipboard.writeText(path);
+      setLatestLog(`[System] Log path copied: ${path}`);
+    } catch (error) {
+      if (runningInTauri) {
+        setErrorMessage(`Could not copy log path: ${formatError(error)}`);
+      } else {
+        setErrorMessage("Log path copy is available in the desktop app.");
+      }
+    }
+  };
+
   const toggleAlwaysOnTop = async () => {
     setErrorMessage("");
 
@@ -721,7 +801,9 @@ function App() {
       realStats.connection_status.toLowerCase().includes("failed"));
 
   let petStatus: PetStatus;
-  if (!isMining && !isCoolingDown) {
+  if (blockFound) {
+    petStatus = "Jackpot";
+  } else if (!isMining && !isCoolingDown) {
     petStatus = "Sleeping";
   } else if (isCoolingDown) {
     petStatus = "Cooling Down";
@@ -745,6 +827,15 @@ function App() {
     ? formatHashrate(realStats.hashrate)
     : `${simulationStats.hashrate.toFixed(2)} MH/s`;
   const compactComputeMode = realModeEnabled ? "CPU" : gpuSimEnabled ? "GPU SIM" : "CPU";
+  const statusClassName = petStatus === "Lucky Flash" || petStatus === "Jackpot" ? "flash" : "";
+  const isMiningAnimation = petStatus === "Mining" || petStatus === "Overdrive";
+  const displayStatus = petStatus === "Jackpot" ? "JACKPOT" : petStatus;
+  const poolStatus = `${config.pool_host}:${config.pool_port}`;
+  const authStatus =
+    realStats.connection_status === "Authorized" || realStats.connection_status === "Mining"
+      ? "Authorized"
+      : realStats.connection_status;
+  const jobStatus = realStats.current_job_id || "Waiting";
   const metrics = [
     ["HASHRATE", displayedHashrate],
     ["BEST DIFF", formatDifficulty(realModeEnabled ? realStats.best_difficulty : simulationStats.bestDifficulty)],
@@ -769,7 +860,7 @@ function App() {
   }, [systemInfo.available_parallelism]);
 
   return (
-    <main className={`pet-shell ${displayMode} ${petStatus === "Lucky Flash" ? "lucky" : ""}`}>
+    <main className={`pet-shell ${displayMode} ${petStatus === "Lucky Flash" || petStatus === "Jackpot" ? "lucky" : ""}`}>
       <header className="topbar">
         <div>
           <p className="eyebrow">
@@ -818,7 +909,7 @@ function App() {
               <div className="pet-expression">{getPetExpression(petStatus)}</div>
               <div className="pet-slots">
                 <div className="slot-reel reel-1">
-                  {petStatus === "Mining" || petStatus === "Overdrive" ? (
+                  {isMiningAnimation ? (
                     <div className="reel-strip">
                       <span>₿</span><span>9</span><span>7</span><span>2</span><span>3</span><span>₿</span>
                     </div>
@@ -827,7 +918,7 @@ function App() {
                   )}
                 </div>
                 <div className="slot-reel reel-2">
-                  {petStatus === "Mining" || petStatus === "Overdrive" ? (
+                  {isMiningAnimation ? (
                     <div className="reel-strip delay-1">
                       <span>7</span><span>₿</span><span>1</span><span>8</span><span>5</span><span>7</span>
                     </div>
@@ -836,7 +927,7 @@ function App() {
                   )}
                 </div>
                 <div className="slot-reel reel-3">
-                  {petStatus === "Mining" || petStatus === "Overdrive" ? (
+                  {isMiningAnimation ? (
                     <div className="reel-strip delay-2">
                       <span>9</span><span>2</span><span>₿</span><span>7</span><span>6</span><span>9</span>
                     </div>
@@ -869,8 +960,8 @@ function App() {
 
         <div className="status-copy">
           <p className="label">STATUS</p>
-          <p className={`status ${petStatus === "Lucky Flash" ? "flash" : ""}`} title={petStatus}>
-            {petStatus}
+          <p className={`status ${statusClassName}`} title={petStatus}>
+            {displayStatus}
           </p>
         </div>
         <button
@@ -893,10 +984,27 @@ function App() {
         </section>
       )}
 
+      {displayMode === "detail" && realModeEnabled && (
+        <section className="real-status-strip" aria-label="Real mining connection status">
+          <span><b>POOL</b>{poolStatus}</span>
+          <span><b>AUTH</b>{authStatus}</span>
+          <span><b>JOB</b>{jobStatus}</span>
+          <span><b>LAST SHARE</b>{lastShare}</span>
+        </section>
+      )}
+
       {displayMode === "detail" && (
         <div className="log-ticker">
           <span className="log-label">LOG:</span>
           <span className="log-text" title={latestLog}>{latestLog}</span>
+          <div className="log-actions">
+            <button className="mini-button" onClick={() => void openLogs()} type="button">
+              OPEN LOGS
+            </button>
+            <button className="mini-button" onClick={() => void copyLogPath()} type="button">
+              COPY LOG PATH
+            </button>
+          </div>
         </div>
       )}
 
@@ -1127,6 +1235,44 @@ function App() {
               <span>Real CPU mining always starts manually.</span>
               <button className="confirm-button" onClick={saveSettings} type="button">
                 SAVE
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {showJackpot && blockFound && (
+        <section className="overlay jackpot-overlay" role="dialog" aria-modal="true" aria-label="Block candidate found">
+          <div className="warning-card jackpot-card">
+            <p className="eyebrow">BLOCK CANDIDATE</p>
+            <h2>JACKPOT</h2>
+            <p>
+              Network target met. The candidate was saved to found_block.json in the app log folder.
+            </p>
+            <dl>
+              <div>
+                <dt>Job</dt>
+                <dd>{blockFound.job_id}</dd>
+              </div>
+              <div>
+                <dt>Nonce</dt>
+                <dd>{blockFound.nonce}</dd>
+              </div>
+              <div>
+                <dt>Pool</dt>
+                <dd>{blockFound.pool}</dd>
+              </div>
+              <div>
+                <dt>Hash</dt>
+                <dd title={blockFound.hash}>{blockFound.hash}</dd>
+              </div>
+            </dl>
+            <div className="panel-actions">
+              <button className="secondary-button" onClick={() => void openLogs()} type="button">
+                OPEN LOGS
+              </button>
+              <button className="confirm-button" onClick={() => setShowJackpot(false)} type="button">
+                OK
               </button>
             </div>
           </div>
