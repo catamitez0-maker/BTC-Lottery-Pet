@@ -473,7 +473,8 @@ h1 {
   padding-bottom: 2px;
 }
 
-.real-status-strip {
+.real-status-strip,
+.resource-status-strip {
   background: rgba(247, 147, 26, 0.07);
   border: 1px solid rgba(247, 147, 26, 0.18);
   border-radius: 6px;
@@ -484,7 +485,8 @@ h1 {
   padding: 4px 6px;
 }
 
-.real-status-strip span {
+.real-status-strip span,
+.resource-status-strip span {
   color: #c1c5cc;
   display: block;
   font: 8px "Cascadia Mono", Consolas, monospace;
@@ -494,7 +496,8 @@ h1 {
   white-space: nowrap;
 }
 
-.real-status-strip b {
+.real-status-strip b,
+.resource-status-strip b {
   color: #f7931a;
   display: inline-block;
   font: 700 7px Inter, system-ui, sans-serif;

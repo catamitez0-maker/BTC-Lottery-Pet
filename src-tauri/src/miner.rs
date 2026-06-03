@@ -191,6 +191,7 @@ impl MiningController {
 
     pub fn stop(&self, app: &AppHandle) {
         if let Some(stop) = self.stop_signal.lock().unwrap().take() {
+            log_message(app, "Mining stop requested");
             stop.store(true, Ordering::Release);
         }
 
@@ -312,14 +313,6 @@ fn run_miner(app: AppHandle, settings: RealMiningSettings, stop: Arc<AtomicBool>
 
     while !stop.load(Ordering::Acquire) {
         shared.set_connection_status("Connecting");
-        log_message(
-            &app,
-            &format!(
-                "Connecting to {}:{}",
-                settings.pool_host, settings.pool_port
-            ),
-        );
-        emit_stats(&app, &shared, 0.0);
 
         if let Err(error) = run_stratum_connection(&app, &settings, &shared, &share_receiver) {
             if stop.load(Ordering::Acquire) {
@@ -332,7 +325,6 @@ fn run_miner(app: AppHandle, settings: RealMiningSettings, stop: Arc<AtomicBool>
                 &app,
                 &format!("Connection error: {}. Retrying in 2s...", error),
             );
-            emit_stats(&app, &shared, 0.0);
             sleep_until_stopped(&stop, Duration::from_secs(2));
         }
     }
@@ -345,7 +337,6 @@ fn run_miner(app: AppHandle, settings: RealMiningSettings, stop: Arc<AtomicBool>
     shared.clear_job();
     shared.set_connection_status("Stopped");
     log_message(&app, "Mining stopped");
-    emit_stats(&app, &shared, 0.0);
 }
 
 fn run_stratum_connection(
@@ -384,7 +375,6 @@ fn run_stratum_connection(
     let mut last_hash_count = shared.hashes.load(Ordering::Relaxed);
 
     shared.set_connection_status("Subscribing");
-    log_message(app, "Subscribing to pool");
     while share_receiver.try_recv().is_ok() {}
     write_message(
         &mut stream,
@@ -417,6 +407,10 @@ fn run_stratum_connection(
         }
 
         for _ in 0..submission_budget(pending_submissions.len()) {
+            if shared.stop.load(Ordering::Acquire) {
+                break;
+            }
+
             let Ok(share) = share_receiver.try_recv() else {
                 break;
             };
@@ -539,7 +533,6 @@ fn handle_server_message(
         }
 
         shared.set_connection_status("Authorizing");
-        log_message(app, "Subscribed to pool. Authorizing...");
     } else if id == 2 {
         if message.get("result").and_then(Value::as_bool) != Some(true) {
             return Err("pool rejected mining.authorize".into());
@@ -784,6 +777,10 @@ fn hash_loop(
                 }
 
                 if difficulty >= job.share_difficulty {
+                    if shared.stop.load(Ordering::Acquire) {
+                        break;
+                    }
+
                     let submission = ShareSubmission {
                         job_id: job.job_id.clone(),
                         extranonce2: extranonce2.clone(),

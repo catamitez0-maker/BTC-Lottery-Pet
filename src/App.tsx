@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, useRef } from "react";
 
 type PetStatus = "Sleeping" | "Mining" | "Overdrive" | "Lucky Flash" | "Cooling Down" | "Connection Error" | "New Best Diff" | "Jackpot";
 type ComputeMode = "cpu" | "gpu_sim" | "gpu_benchmark" | "gpu_real_experimental";
+type PerformancePreset = "eco" | "normal" | "turbo" | "custom";
 
 interface AppConfig {
   btc_address: string;
@@ -12,6 +13,7 @@ interface AppConfig {
   worker_name: string;
   cpu_limit_percent: number;
   cpu_threads: number;
+  performance_preset: PerformancePreset;
   real_mining_enabled: boolean;
   compute_mode: ComputeMode;
   gpu_enabled: boolean;
@@ -74,6 +76,7 @@ const fallbackConfig: AppConfig = {
   worker_name: "btc-lottery-pet",
   cpu_limit_percent: 10,
   cpu_threads: 1,
+  performance_preset: "eco",
   real_mining_enabled: false,
   compute_mode: "cpu",
   gpu_enabled: false,
@@ -145,6 +148,36 @@ function formatHashrate(hashrate: number) {
   }
 
   return `${hashrate.toFixed(0)} H/s`;
+}
+
+function threadsForPreset(
+  preset: PerformancePreset,
+  systemInfo: SystemInfo,
+  customThreads: number,
+) {
+  switch (preset) {
+    case "eco":
+      return 1;
+    case "normal":
+      return systemInfo.recommended_cpu_threads;
+    case "turbo":
+      return systemInfo.available_parallelism;
+    case "custom":
+      return Math.min(Math.max(1, customThreads), systemInfo.available_parallelism);
+  }
+}
+
+function performancePresetLabel(preset: PerformancePreset) {
+  switch (preset) {
+    case "eco":
+      return "Eco";
+    case "normal":
+      return "Normal";
+    case "turbo":
+      return "Turbo";
+    case "custom":
+      return "Custom";
+  }
 }
 
 function getPetExpression(status: PetStatus): string {
@@ -575,6 +608,14 @@ function App() {
       return;
     }
 
+    if (
+      (config.performance_preset === "turbo" ||
+        config.cpu_threads > systemInfo.recommended_cpu_threads) &&
+      !window.confirm("High CPU usage may heat your computer. Continue?")
+    ) {
+      return;
+    }
+
     setIsMining(true);
     setRealStats((current) => ({ ...current, connection_status: "Starting" }));
 
@@ -675,18 +716,18 @@ function App() {
   const saveSettings = async () => {
     setErrorMessage("");
 
-    const cpuThreads = Number(draftConfig.cpu_threads);
-    if (
-      cpuThreads > systemInfo.recommended_cpu_threads &&
-      !window.confirm("High CPU usage may affect your computer. Save this CPU thread count?")
-    ) {
-      return;
-    }
+    const performancePreset = draftConfig.performance_preset;
+    const cpuThreads = threadsForPreset(
+      performancePreset,
+      systemInfo,
+      Number(draftConfig.cpu_threads),
+    );
 
     const settings: AppConfig = {
       ...draftConfig,
       pool_port: Number(draftConfig.pool_port),
       cpu_threads: cpuThreads,
+      performance_preset: performancePreset,
       real_mining_enabled: false,
       compute_mode:
         draftConfig.compute_mode === "gpu_real_experimental"
@@ -836,6 +877,13 @@ function App() {
       ? "Authorized"
       : realStats.connection_status;
   const jobStatus = realStats.current_job_id || "Waiting";
+  const resourceMetrics = [
+    ["PRESET", performancePresetLabel(config.performance_preset)],
+    ["CPU THREADS", `${config.cpu_threads}`],
+    ["RECOMMENDED", `${systemInfo.recommended_cpu_threads}`],
+    ["REAL MINING", "CPU only"],
+    ["GPU", "Sim/Benchmark only"],
+  ];
   const metrics = [
     ["HASHRATE", displayedHashrate],
     ["BEST DIFF", formatDifficulty(realModeEnabled ? realStats.best_difficulty : simulationStats.bestDifficulty)],
@@ -984,6 +1032,14 @@ function App() {
         </section>
       )}
 
+      {displayMode === "detail" && (
+        <section className="resource-status-strip" aria-label="Resource status">
+          {resourceMetrics.map(([label, value]) => (
+            <span key={label}><b>{label}</b>{value}</span>
+          ))}
+        </section>
+      )}
+
       {displayMode === "detail" && realModeEnabled && (
         <section className="real-status-strip" aria-label="Real mining connection status">
           <span><b>POOL</b>{poolStatus}</span>
@@ -1114,11 +1170,45 @@ function App() {
                 />
               </label>
               <label>
+                PERFORMANCE PRESET
+                <select
+                  value={draftConfig.performance_preset}
+                  onChange={(event) => {
+                    const performancePreset = event.target.value as PerformancePreset;
+                    setDraftConfig({
+                      ...draftConfig,
+                      performance_preset: performancePreset,
+                      cpu_threads: threadsForPreset(
+                        performancePreset,
+                        systemInfo,
+                        Number(draftConfig.cpu_threads),
+                      ),
+                    });
+                  }}
+                >
+                  <option value="eco">Eco - 1 thread</option>
+                  <option value="normal">
+                    Normal - {systemInfo.recommended_cpu_threads} thread
+                    {systemInfo.recommended_cpu_threads === 1 ? "" : "s"}
+                  </option>
+                  <option value="turbo">
+                    Turbo - {systemInfo.available_parallelism} thread
+                    {systemInfo.available_parallelism === 1 ? "" : "s"}
+                  </option>
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+              <label>
                 CPU THREADS
                 <select
+                  disabled={draftConfig.performance_preset !== "custom"}
                   value={draftConfig.cpu_threads}
                   onChange={(event) =>
-                    setDraftConfig({ ...draftConfig, cpu_threads: Number(event.target.value) })
+                    setDraftConfig({
+                      ...draftConfig,
+                      performance_preset: "custom",
+                      cpu_threads: Number(event.target.value),
+                    })
                   }
                 >
                   {cpuThreadOptions.map((threads) => (
@@ -1244,7 +1334,7 @@ function App() {
       {showJackpot && blockFound && (
         <section className="overlay jackpot-overlay" role="dialog" aria-modal="true" aria-label="Block candidate found">
           <div className="warning-card jackpot-card">
-            <p className="eyebrow">BLOCK CANDIDATE</p>
+            <p className="eyebrow">BLOCK CANDIDATE FOUND</p>
             <h2>JACKPOT</h2>
             <p>
               Network target met. The candidate was saved to found_block.json in the app log folder.
@@ -1263,6 +1353,14 @@ function App() {
                 <dd>{blockFound.pool}</dd>
               </div>
               <div>
+                <dt>Difficulty</dt>
+                <dd>{formatDifficulty(blockFound.difficulty)}</dd>
+              </div>
+              <div>
+                <dt>Timestamp</dt>
+                <dd title={blockFound.timestamp}>{blockFound.timestamp}</dd>
+              </div>
+              <div>
                 <dt>Hash</dt>
                 <dd title={blockFound.hash}>{blockFound.hash}</dd>
               </div>
@@ -1272,7 +1370,7 @@ function App() {
                 OPEN LOGS
               </button>
               <button className="confirm-button" onClick={() => setShowJackpot(false)} type="button">
-                OK
+                DISMISS
               </button>
             </div>
           </div>

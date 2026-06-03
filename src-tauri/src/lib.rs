@@ -23,6 +23,16 @@ enum ComputeMode {
     GpuRealExperimental,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PerformancePreset {
+    #[default]
+    Eco,
+    Normal,
+    Turbo,
+    Custom,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 struct AppConfig {
@@ -33,6 +43,7 @@ struct AppConfig {
     worker_name: String,
     cpu_limit_percent: u8,
     cpu_threads: usize,
+    performance_preset: PerformancePreset,
     real_mining_enabled: bool,
     compute_mode: ComputeMode,
     gpu_enabled: bool,
@@ -49,6 +60,7 @@ impl Default for AppConfig {
             worker_name: "btc-lottery-pet".into(),
             cpu_limit_percent: 10,
             cpu_threads: 1,
+            performance_preset: PerformancePreset::Eco,
             real_mining_enabled: false,
             compute_mode: ComputeMode::Cpu,
             gpu_enabled: false,
@@ -81,7 +93,14 @@ impl AppConfig {
             self.worker_name = "btc-lottery-pet".into();
         }
 
-        self.cpu_threads = self.cpu_threads.clamp(1, available_parallelism());
+        let available_threads = available_parallelism();
+        let recommended_threads = recommended_cpu_threads();
+        self.cpu_threads = match self.performance_preset {
+            PerformancePreset::Eco => 1,
+            PerformancePreset::Normal => recommended_threads,
+            PerformancePreset::Turbo => available_threads,
+            PerformancePreset::Custom => self.cpu_threads.clamp(1, available_threads),
+        };
         self.gpu_intensity_percent = self.gpu_intensity_percent.clamp(1, 100);
 
         match self.compute_mode {
@@ -128,6 +147,10 @@ fn available_parallelism() -> usize {
     thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(1)
+}
+
+fn recommended_cpu_threads() -> usize {
+    available_parallelism().min(2)
 }
 
 fn default_port_for_pool(pool_host: &str) -> u16 {
@@ -203,7 +226,7 @@ fn get_system_info() -> SystemInfo {
     SystemInfo {
         available_parallelism,
         default_cpu_threads: 1,
-        recommended_cpu_threads: available_parallelism.min(2),
+        recommended_cpu_threads: recommended_cpu_threads(),
     }
 }
 
@@ -424,7 +447,10 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{get_gpu_devices, get_system_info, run_gpu_benchmark, AppConfig, ComputeMode};
+    use super::{
+        get_gpu_devices, get_system_info, run_gpu_benchmark, AppConfig, ComputeMode,
+        PerformancePreset,
+    };
 
     #[test]
     fn normalizes_saved_config_to_safe_startup_values() {
@@ -456,6 +482,44 @@ mod tests {
 
         assert_eq!(normalized.compute_mode, ComputeMode::GpuSim);
         assert!(normalized.gpu_enabled);
+    }
+
+    #[test]
+    fn performance_presets_control_cpu_threads() {
+        let available_threads = super::available_parallelism();
+        let recommended_threads = super::recommended_cpu_threads();
+
+        let eco = AppConfig {
+            performance_preset: PerformancePreset::Eco,
+            cpu_threads: available_threads,
+            ..AppConfig::default()
+        }
+        .normalized();
+        assert_eq!(eco.cpu_threads, 1);
+
+        let normal = AppConfig {
+            performance_preset: PerformancePreset::Normal,
+            cpu_threads: 1,
+            ..AppConfig::default()
+        }
+        .normalized();
+        assert_eq!(normal.cpu_threads, recommended_threads);
+
+        let turbo = AppConfig {
+            performance_preset: PerformancePreset::Turbo,
+            cpu_threads: 1,
+            ..AppConfig::default()
+        }
+        .normalized();
+        assert_eq!(turbo.cpu_threads, available_threads);
+
+        let custom = AppConfig {
+            performance_preset: PerformancePreset::Custom,
+            cpu_threads: available_threads + 1,
+            ..AppConfig::default()
+        }
+        .normalized();
+        assert_eq!(custom.cpu_threads, available_threads);
     }
 
     #[test]

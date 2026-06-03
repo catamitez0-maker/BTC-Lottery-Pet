@@ -90,7 +90,9 @@ The Rust backend owns all real mining work:
 5. Run SHA-256d nonce loops using no more than the configured CPU thread count.
 6. Send qualifying shares with `mining.submit`.
 7. Emit only UI statistics: hashrate, accepted shares, rejected shares, best
-   difficulty, current job ID, and connection status.
+   difficulty, current job ID, and connection status. Mining stats are emitted
+   at most once per second during real mining, except for the immediate local
+   `Stopped` state emitted after the user clicks `STOP`.
 8. Compare each candidate header hash against the network target derived from
    `nbits`; if it meets that target, emit a local `block-found` event, write
    `found_block.json`, and keep the normal share-submission path active.
@@ -110,6 +112,14 @@ unanswered share submissions, and sends at most 16 queued shares before
 returning to socket reads. It also rejects non-positive and pathologically low
 share difficulties.
 
+Mining logs are event-driven rather than hash-driven. The app logs connection,
+authorization, job, share, stop, warning, and error events; it does not emit UI
+events for every hash or nonce. When `STOP` is clicked, the backend logs
+`Mining stop requested`, sets the stop signal immediately, emits a zero-hashrate
+`Stopped` stats snapshot, and avoids submitting queued shares after the stop
+signal is observed. Worker cleanup continues on the background mining thread so
+the UI is not blocked by worker joins.
+
 ## Configuration
 
 The repository-level [`config.json`](./config.json) contains defaults:
@@ -122,6 +132,7 @@ The repository-level [`config.json`](./config.json) contains defaults:
   "worker_name": "btc-lottery-pet",
   "cpu_limit_percent": 10,
   "cpu_threads": 1,
+  "performance_preset": "eco",
   "real_mining_enabled": false,
   "compute_mode": "cpu",
   "gpu_enabled": false,
@@ -132,9 +143,9 @@ The repository-level [`config.json`](./config.json) contains defaults:
 
 On first launch, the Rust backend copies these values to the app-specific
 configuration directory. Existing Phase 1 config files are normalized when
-loaded. `cpu_threads` is the enforced real-mining CPU limit and defaults to one
-thread. The older `cpu_limit_percent` field remains reserved for future
-fine-grained throttling.
+loaded. `performance_preset` and `cpu_threads` are the enforced real-mining CPU
+limits. The default `eco` preset uses one CPU thread. The older
+`cpu_limit_percent` field remains reserved for future fine-grained throttling.
 
 Upgrades preserve an existing saved pool selection. If you previously ran the
 app with the older `pool.nerdminers.org` default, review the settings panel and
@@ -149,21 +160,28 @@ the internal `gpu_enabled` flag is `false`, and GPU intensity defaults to `10`.
 The backend refuses to preserve `gpu_real_experimental` as a startup mode:
 loading or saving that value resets it to `cpu`.
 
-## CPU Threads
+## Performance presets
 
 The settings panel asks the Rust backend for the computer's available logical
 CPU thread count and presents safe choices from `1`, `2`, `4`, and the detected
-maximum without exceeding that maximum. One thread remains the default.
+maximum without exceeding that maximum.
 
-Choosing more than the conservative recommendation displays:
+| Preset | Real CPU mining threads |
+| --- | ---: |
+| `Eco` | `1` |
+| `Normal` | Backend recommended thread count, currently up to `2` |
+| `Turbo` | Detected logical CPU thread count |
+| `Custom` | User-selected `CPU THREADS` value |
+
+Starting real CPU mining with `Turbo` or a custom thread count above the
+backend recommendation displays:
 
 ```text
-High CPU usage may affect your computer.
+High CPU usage may heat your computer. Continue?
 ```
 
-The UI prompt is informational. The Rust backend performs its own validation
-again immediately before real mining starts, so an out-of-range thread count
-cannot bypass the local limit.
+The UI prompt is informational. The Rust backend performs its own normalization
+and validation, so an out-of-range thread count cannot bypass the local limit.
 
 ## GPU framework status
 
@@ -239,7 +257,7 @@ Use exactly one of these commands for the task at hand:
 | --- | --- |
 | `npm run tauri:dev` | Recommended development desktop app. Starts Vite for Tauri and opens one `BTC Lottery Pet Dev` desktop window. It does not ask Vite to open a browser. |
 | `npm run dev` | Browser-only React preview at `http://localhost:1420`. It does not launch Tauri. |
-| `npm run tauri:build` | Stable Windows package build for `BTC Lottery Pet`. |
+| `npm run tauri:build` | Stable Windows NSIS package build for `BTC Lottery Pet`. |
 
 Release builds use the Windows GUI subsystem, so the packaged app should not
 open an extra black console window next to the pet window. `npm run tauri:dev`
@@ -271,15 +289,15 @@ npm run dev
 Browser previews can exercise the simulation and settings UI. Real mining runs
 only inside the Tauri app because the Rust backend owns network and hashing.
 
-## Build the stable Windows installers
+## Build the stable Windows installer
 
 ```powershell
 cmd.exe /v:on /d /s /c 'call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && set "PATH=%USERPROFILE%\.cargo\bin;!PATH!" && npm run tauri:build'
 ```
 
 Tauri writes the stable executable to
-`src-tauri\target\release\btc-lottery-pet.exe` and stable installer bundles
-under `src-tauri\target\release\bundle`.
+`src-tauri\target\release\btc-lottery-pet.exe` and the stable NSIS installer
+under `src-tauri\target\release\bundle\nsis`.
 The generated installer may download Microsoft's WebView2 bootstrapper when
 the WebView2 runtime is missing from the target computer.
 
