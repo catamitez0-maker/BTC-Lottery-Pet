@@ -134,9 +134,9 @@ Enabling real mode is a session-only UI action. Every app launch starts in
 simulation mode, and mining begins only after the user clicks `START`.
 
 GPU settings also start conservatively. The default `compute_mode` is `cpu`,
-`gpu_enabled` is `false`, and GPU intensity defaults to `10`. The backend
-refuses to preserve `gpu_real_experimental` as a startup mode: loading or
-saving that value resets it to `cpu`.
+the internal `gpu_enabled` flag is `false`, and GPU intensity defaults to `10`.
+The backend refuses to preserve `gpu_real_experimental` as a startup mode:
+loading or saving that value resets it to `cpu`.
 
 ## CPU Threads
 
@@ -162,12 +162,16 @@ GPU support is currently a safe framework, not real GPU mining:
 | --- | --- |
 | `CPU` | Local simulation, or explicitly confirmed real CPU mining. |
 | `GPU Sim` | Local-only simulated higher hashrate and an `Overdrive` pet visual. It does not call a GPU API. |
-| `GPU Benchmark` | Placeholder benchmark returning a simulated result. It does not connect to a pool or perform a real GPU workload. |
+| `GPU Benchmark` | Placeholder benchmark returning a simulated result. It does not connect to a pool and no real GPU workload is started. |
 | `GPU Real Experimental` | Disabled and marked `Coming Soon`. It cannot be saved as the startup mode. |
 
 The placeholder device list currently contains `Auto` and `Simulated GPU`.
 GPU intensity choices are `10%`, `25%`, `50%`, `75%`, and `100%`. These values
 only affect GPU simulation and the placeholder benchmark today.
+
+Compute Mode is the only GPU control in the settings panel. There is no separate
+user-controlled GPU checkbox: `CPU` keeps GPU features disabled, `GPU Sim`
+enables simulation, and `GPU Benchmark` enables only the placeholder benchmark.
 
 ## Prerequisites on Windows
 

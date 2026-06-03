@@ -84,13 +84,15 @@ impl AppConfig {
         self.cpu_threads = self.cpu_threads.clamp(1, available_parallelism());
         self.gpu_intensity_percent = self.gpu_intensity_percent.clamp(1, 100);
 
-        if self.compute_mode == ComputeMode::GpuRealExperimental {
-            self.compute_mode = ComputeMode::Cpu;
-        }
-
-        if self.compute_mode == ComputeMode::Cpu {
-            self.gpu_enabled = false;
-            self.gpu_device_id = None;
+        match self.compute_mode {
+            ComputeMode::Cpu | ComputeMode::GpuRealExperimental => {
+                self.compute_mode = ComputeMode::Cpu;
+                self.gpu_enabled = false;
+                self.gpu_device_id = None;
+            }
+            ComputeMode::GpuSim | ComputeMode::GpuBenchmark => {
+                self.gpu_enabled = true;
+            }
         }
 
         self
@@ -241,7 +243,7 @@ fn run_gpu_benchmark(
         gpu_intensity_percent,
         hashrate: 120_000_000.0 * f64::from(gpu_intensity_percent) / 10.0,
         duration_ms: 250,
-        note: "Simulated benchmark only. No GPU workload was started.".into(),
+        note: "Simulated benchmark only. No real GPU workload was started.".into(),
     }
 }
 
@@ -383,6 +385,20 @@ mod tests {
     }
 
     #[test]
+    fn compute_mode_controls_gpu_enabled_flag() {
+        let config = AppConfig {
+            compute_mode: ComputeMode::GpuSim,
+            gpu_enabled: false,
+            ..AppConfig::default()
+        };
+
+        let normalized = config.normalized();
+
+        assert_eq!(normalized.compute_mode, ComputeMode::GpuSim);
+        assert!(normalized.gpu_enabled);
+    }
+
+    #[test]
     fn reports_conservative_cpu_thread_defaults() {
         let info = get_system_info();
 
@@ -402,6 +418,6 @@ mod tests {
         assert!(result.simulated);
         assert_eq!(result.device_id, "simulated-gpu");
         assert_eq!(result.gpu_intensity_percent, 25);
-        assert!(result.note.contains("No GPU workload"));
+        assert!(result.note.contains("No real GPU workload"));
     }
 }

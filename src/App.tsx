@@ -365,7 +365,7 @@ function App() {
     };
   }, []);
 
-  const gpuSimEnabled = config.compute_mode === "gpu_sim" && config.gpu_enabled;
+  const gpuSimEnabled = config.compute_mode === "gpu_sim";
 
   // Simulation Mining Loop
   useEffect(() => {
@@ -643,9 +643,8 @@ function App() {
           ? "cpu"
           : draftConfig.compute_mode,
       gpu_enabled:
-        draftConfig.compute_mode !== "cpu" &&
-        draftConfig.compute_mode !== "gpu_real_experimental" &&
-        draftConfig.gpu_enabled,
+        draftConfig.compute_mode === "gpu_sim" ||
+        draftConfig.compute_mode === "gpu_benchmark",
       gpu_device_id: draftConfig.compute_mode === "cpu" ? null : draftConfig.gpu_device_id,
     };
 
@@ -691,7 +690,7 @@ function App() {
         gpu_intensity_percent: gpuIntensityPercent,
         hashrate: 120_000_000 * gpuIntensityPercent / 10,
         duration_ms: 250,
-        note: "Simulated benchmark only. No GPU workload was started.",
+        note: "Simulated benchmark only. No real GPU workload was started.",
       });
     }
   };
@@ -1047,7 +1046,7 @@ function App() {
               <label>
                 GPU DEVICE
                 <select
-                  disabled={!draftConfig.gpu_enabled}
+                  disabled={draftConfig.compute_mode === "cpu"}
                   value={draftConfig.gpu_device_id || "auto"}
                   onChange={(event) =>
                     setDraftConfig({
@@ -1066,7 +1065,7 @@ function App() {
               <label>
                 GPU INTENSITY
                 <select
-                  disabled={!draftConfig.gpu_enabled}
+                  disabled={draftConfig.compute_mode === "cpu"}
                   value={draftConfig.gpu_intensity_percent}
                   onChange={(event) =>
                     setDraftConfig({
@@ -1082,31 +1081,46 @@ function App() {
                   ))}
                 </select>
               </label>
-              <label className="checkbox-label">
-                <input
-                  checked={draftConfig.gpu_enabled}
-                  disabled={draftConfig.compute_mode === "cpu"}
-                  onChange={(event) =>
-                    setDraftConfig({ ...draftConfig, gpu_enabled: event.target.checked })
-                  }
-                  type="checkbox"
-                />
-                GPU ENABLED
-              </label>
+              <div className="compute-status" aria-label="GPU status">
+                <span>GPU</span>
+                <strong>
+                  {draftConfig.compute_mode === "gpu_sim"
+                    ? "SIM ENABLED"
+                    : draftConfig.compute_mode === "gpu_benchmark"
+                      ? "BENCHMARK ENABLED"
+                      : "DISABLED"}
+                </strong>
+              </div>
             </div>
             <div className="benchmark-row">
               <button
                 className="secondary-button"
-                disabled={!draftConfig.gpu_enabled}
+                disabled={draftConfig.compute_mode !== "gpu_benchmark"}
                 onClick={() => void runGpuBenchmark()}
                 type="button"
               >
                 RUN BENCHMARK
               </button>
               {benchmarkResult && (
-                <span className="benchmark-result">
-                  GPU SIM: {formatHashrate(benchmarkResult.hashrate)} at {benchmarkResult.gpu_intensity_percent}%
-                </span>
+                <div className="benchmark-result">
+                  <div>
+                    <span>Device</span>
+                    <strong>{benchmarkResult.device_name}</strong>
+                  </div>
+                  <div>
+                    <span>Mode</span>
+                    <strong>{benchmarkResult.simulated ? "GPU Benchmark (simulated)" : "GPU Benchmark"}</strong>
+                  </div>
+                  <div>
+                    <span>Hashrate</span>
+                    <strong>{formatHashrate(benchmarkResult.hashrate)}</strong>
+                  </div>
+                  <div>
+                    <span>Intensity</span>
+                    <strong>{benchmarkResult.gpu_intensity_percent}%</strong>
+                  </div>
+                  <p>{benchmarkResult.note}</p>
+                </div>
               )}
             </div>
             <div className="panel-actions">
