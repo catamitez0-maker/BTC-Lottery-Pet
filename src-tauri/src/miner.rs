@@ -30,7 +30,7 @@ const MAX_LOG_FILE_BYTES: u64 = 1024 * 1024;
 const STATS_EVENT: &str = "mining-stats";
 const BLOCK_FOUND_EVENT: &str = "block-found";
 
-fn log_message(app: &AppHandle, message: &str) {
+pub(crate) fn log_message(app: &AppHandle, message: &str) {
     let _ = app.emit("mining-log", message);
 
     let log_dir = match app.path().app_log_dir() {

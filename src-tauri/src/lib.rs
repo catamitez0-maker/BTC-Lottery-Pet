@@ -1,8 +1,13 @@
 mod miner;
+mod notifications;
 
 use std::{fs, path::PathBuf, process::Command, thread};
 
 use miner::{MiningController, RealMiningSettings};
+use notifications::{
+    HeartbeatInterval, HeartbeatSnapshot, JackpotNotificationEvent, NotificationChannel,
+    NotificationSettings,
+};
 use serde::{Deserialize, Serialize};
 use tauri::{
     image::Image,
@@ -45,6 +50,13 @@ struct AppConfig {
     cpu_threads: usize,
     performance_preset: PerformancePreset,
     real_mining_enabled: bool,
+    enable_notifications: bool,
+    notify_on_jackpot: bool,
+    notify_on_share_accepted: bool,
+    notify_on_connection_error: bool,
+    heartbeat_interval: HeartbeatInterval,
+    notification_channel: NotificationChannel,
+    webhook_url: String,
     compute_mode: ComputeMode,
     gpu_enabled: bool,
     gpu_device_id: Option<String>,
@@ -62,6 +74,13 @@ impl Default for AppConfig {
             cpu_threads: 1,
             performance_preset: PerformancePreset::Eco,
             real_mining_enabled: false,
+            enable_notifications: true,
+            notify_on_jackpot: true,
+            notify_on_share_accepted: false,
+            notify_on_connection_error: true,
+            heartbeat_interval: HeartbeatInterval::Off,
+            notification_channel: NotificationChannel::LocalWindowsToast,
+            webhook_url: String::new(),
             compute_mode: ComputeMode::Cpu,
             gpu_enabled: false,
             gpu_device_id: None,
@@ -75,6 +94,7 @@ impl AppConfig {
         self.btc_address = self.btc_address.trim().to_owned();
         self.pool_host = self.pool_host.trim().to_owned();
         self.worker_name = self.worker_name.trim().to_owned();
+        self.webhook_url = self.webhook_url.trim().to_owned();
         self.real_mining_enabled = false;
         self.gpu_device_id = self
             .gpu_device_id
@@ -285,6 +305,42 @@ fn stop_real_mining(app: AppHandle, state: State<'_, MiningController>) {
 }
 
 #[tauri::command]
+fn notify_jackpot(
+    app: AppHandle,
+    settings: NotificationSettings,
+    event: JackpotNotificationEvent,
+) -> Result<(), String> {
+    notifications::notify_jackpot(&app, settings, event);
+    Ok(())
+}
+
+#[tauri::command]
+fn notify_share_accepted(app: AppHandle, settings: NotificationSettings) -> Result<(), String> {
+    notifications::notify_share_accepted(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+fn notify_connection_error(
+    app: AppHandle,
+    settings: NotificationSettings,
+    status: String,
+) -> Result<(), String> {
+    notifications::notify_connection_error(&app, settings, status);
+    Ok(())
+}
+
+#[tauri::command]
+fn send_heartbeat_notification(
+    app: AppHandle,
+    settings: NotificationSettings,
+    snapshot: HeartbeatSnapshot,
+) -> Result<(), String> {
+    notifications::send_heartbeat(&app, settings, snapshot);
+    Ok(())
+}
+
+#[tauri::command]
 fn get_log_path(app: AppHandle) -> Result<String, String> {
     Ok(ensure_log_dir(&app)?.display().to_string())
 }
@@ -437,6 +493,10 @@ pub fn run() {
             run_gpu_benchmark,
             start_real_mining,
             stop_real_mining,
+            notify_jackpot,
+            notify_share_accepted,
+            notify_connection_error,
+            send_heartbeat_notification,
             get_log_path,
             open_log_folder,
             set_window_always_on_top

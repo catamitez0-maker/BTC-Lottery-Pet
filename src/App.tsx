@@ -5,6 +5,8 @@ import { useEffect, useMemo, useState, useRef } from "react";
 type PetStatus = "Sleeping" | "Mining" | "Overdrive" | "Lucky Flash" | "Cooling Down" | "Connection Error" | "New Best Diff" | "Jackpot";
 type ComputeMode = "cpu" | "gpu_sim" | "gpu_benchmark" | "gpu_real_experimental";
 type PerformancePreset = "eco" | "normal" | "turbo" | "custom";
+type HeartbeatInterval = "off" | "30min" | "1h" | "6h";
+type NotificationChannel = "local_windows_toast" | "webhook" | "telegram_bot" | "ntfy_sh";
 
 interface AppConfig {
   btc_address: string;
@@ -15,6 +17,13 @@ interface AppConfig {
   cpu_threads: number;
   performance_preset: PerformancePreset;
   real_mining_enabled: boolean;
+  enable_notifications: boolean;
+  notify_on_jackpot: boolean;
+  notify_on_share_accepted: boolean;
+  notify_on_connection_error: boolean;
+  heartbeat_interval: HeartbeatInterval;
+  notification_channel: NotificationChannel;
+  webhook_url: string;
   compute_mode: ComputeMode;
   gpu_enabled: boolean;
   gpu_device_id: string | null;
@@ -78,6 +87,13 @@ const fallbackConfig: AppConfig = {
   cpu_threads: 1,
   performance_preset: "eco",
   real_mining_enabled: false,
+  enable_notifications: true,
+  notify_on_jackpot: true,
+  notify_on_share_accepted: false,
+  notify_on_connection_error: true,
+  heartbeat_interval: "off",
+  notification_channel: "local_windows_toast",
+  webhook_url: "",
   compute_mode: "cpu",
   gpu_enabled: false,
   gpu_device_id: null,
@@ -180,6 +196,31 @@ function performancePresetLabel(preset: PerformancePreset) {
   }
 }
 
+function notificationSettingsFromConfig(config: AppConfig) {
+  return {
+    enableNotifications: config.enable_notifications,
+    notifyOnJackpot: config.notify_on_jackpot,
+    notifyOnShareAccepted: config.notify_on_share_accepted,
+    notifyOnConnectionError: config.notify_on_connection_error,
+    heartbeatInterval: config.heartbeat_interval,
+    notificationChannel: config.notification_channel,
+    webhookUrl: config.webhook_url,
+  };
+}
+
+function heartbeatIntervalMs(interval: HeartbeatInterval) {
+  switch (interval) {
+    case "30min":
+      return 30 * 60 * 1000;
+    case "1h":
+      return 60 * 60 * 1000;
+    case "6h":
+      return 6 * 60 * 60 * 1000;
+    default:
+      return null;
+  }
+}
+
 function getPetExpression(status: PetStatus): string {
   switch (status) {
     case "Sleeping":
@@ -261,6 +302,52 @@ function App() {
   const coolingDownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const simShareTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const simLuckyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const configRef = useRef(config);
+  const realStatsRef = useRef(realStats);
+  const simulationStatsRef = useRef(simulationStats);
+  const appUptimeRef = useRef(appUptime);
+  const miningUptimeRef = useRef(miningUptime);
+  const simAcceptedRef = useRef(simAccepted);
+  const simRejectedRef = useRef(simRejected);
+  const realModeEnabledRef = useRef(realModeEnabled);
+  const isMiningRef = useRef(isMining);
+  const lastConnectionNotificationRef = useRef(0);
+
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
+
+  useEffect(() => {
+    realStatsRef.current = realStats;
+  }, [realStats]);
+
+  useEffect(() => {
+    simulationStatsRef.current = simulationStats;
+  }, [simulationStats]);
+
+  useEffect(() => {
+    appUptimeRef.current = appUptime;
+  }, [appUptime]);
+
+  useEffect(() => {
+    miningUptimeRef.current = miningUptime;
+  }, [miningUptime]);
+
+  useEffect(() => {
+    simAcceptedRef.current = simAccepted;
+  }, [simAccepted]);
+
+  useEffect(() => {
+    simRejectedRef.current = simRejected;
+  }, [simRejected]);
+
+  useEffect(() => {
+    realModeEnabledRef.current = realModeEnabled;
+  }, [realModeEnabled]);
+
+  useEffect(() => {
+    isMiningRef.current = isMining;
+  }, [isMining]);
 
   // Component unmount cleanup
   useEffect(() => {
@@ -347,6 +434,23 @@ function App() {
       if (lowerMessage.includes("share submitted") || lowerMessage.includes("share accepted") || lowerMessage.includes("share rejected")) {
         setLastShare(message.replace(/^\[[^\]]+\]\s*/, ""));
       }
+
+      if (lowerMessage.includes("share accepted")) {
+        void invoke("notify_share_accepted", {
+          settings: notificationSettingsFromConfig(configRef.current),
+        }).catch(() => {});
+      }
+
+      if (lowerMessage.includes("connection error")) {
+        const now = Date.now();
+        if (now - lastConnectionNotificationRef.current > 60_000) {
+          lastConnectionNotificationRef.current = now;
+          void invoke("notify_connection_error", {
+            settings: notificationSettingsFromConfig(configRef.current),
+            status: message.replace(/^\[[^\]]+\]\s*/, ""),
+          }).catch(() => {});
+        }
+      }
     })
       .then((cleanup) => {
         unlisten = cleanup;
@@ -370,6 +474,16 @@ function App() {
       setIsLucky(false);
       setIsNewBest(false);
       setLatestLog(`[Jackpot] Block candidate found: job=${event.payload.job_id}, hash=${event.payload.hash}`);
+      void invoke("notify_jackpot", {
+        settings: notificationSettingsFromConfig(configRef.current),
+        event: {
+          pool: event.payload.pool,
+          jobId: event.payload.job_id,
+          hash: event.payload.hash,
+          difficulty: event.payload.difficulty,
+          timestamp: event.payload.timestamp,
+        },
+      }).catch(() => {});
     })
       .then((cleanup) => {
         unlisten = cleanup;
@@ -444,6 +558,45 @@ function App() {
       window.clearInterval(timer);
     };
   }, []);
+
+  // Heartbeat notifications are deliberately coarse-grained to avoid spam.
+  useEffect(() => {
+    const intervalMs = heartbeatIntervalMs(config.heartbeat_interval);
+    if (!config.enable_notifications || intervalMs === null) {
+      return;
+    }
+
+    const sendHeartbeat = () => {
+      const currentConfig = configRef.current;
+      const currentRealStats = realStatsRef.current;
+      const currentSimulationStats = simulationStatsRef.current;
+      const isRealMode = realModeEnabledRef.current;
+      const running = isMiningRef.current;
+      const uptimeSeconds = running ? miningUptimeRef.current : appUptimeRef.current;
+
+      void invoke("send_heartbeat_notification", {
+        settings: notificationSettingsFromConfig(currentConfig),
+        snapshot: {
+          status: running
+            ? isRealMode
+              ? currentRealStats.connection_status
+              : currentSimulationStats.status
+            : "Sleeping",
+          hashrate: isRealMode ? currentRealStats.hashrate : currentSimulationStats.hashrate * 1_000_000,
+          acceptedShares: isRealMode ? currentRealStats.accepted_shares : simAcceptedRef.current,
+          rejectedShares: isRealMode ? currentRealStats.rejected_shares : simRejectedRef.current,
+          bestDifficulty: isRealMode
+            ? currentRealStats.best_difficulty
+            : currentSimulationStats.bestDifficulty,
+          uptime: formatUptime(uptimeSeconds),
+          pool: `${currentConfig.pool_host}:${currentConfig.pool_port}`,
+        },
+      }).catch(() => {});
+    };
+
+    const timer = window.setInterval(sendHeartbeat, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [config.enable_notifications, config.heartbeat_interval]);
 
   const gpuSimEnabled = config.compute_mode === "gpu_sim";
 
@@ -1289,6 +1442,115 @@ function App() {
                       : "DISABLED"}
                 </strong>
               </div>
+              <label>
+                ENABLE NOTIFICATIONS
+                <select
+                  value={draftConfig.enable_notifications ? "true" : "false"}
+                  onChange={(event) =>
+                    setDraftConfig({
+                      ...draftConfig,
+                      enable_notifications: event.target.value === "true",
+                    })
+                  }
+                >
+                  <option value="true">Enabled</option>
+                  <option value="false">Disabled</option>
+                </select>
+              </label>
+              <label>
+                NOTIFY JACKPOT
+                <select
+                  value={draftConfig.notify_on_jackpot ? "true" : "false"}
+                  onChange={(event) =>
+                    setDraftConfig({
+                      ...draftConfig,
+                      notify_on_jackpot: event.target.value === "true",
+                    })
+                  }
+                >
+                  <option value="true">Enabled</option>
+                  <option value="false">Disabled</option>
+                </select>
+              </label>
+              <label>
+                NOTIFY SHARE ACCEPTED
+                <select
+                  value={draftConfig.notify_on_share_accepted ? "true" : "false"}
+                  onChange={(event) =>
+                    setDraftConfig({
+                      ...draftConfig,
+                      notify_on_share_accepted: event.target.value === "true",
+                    })
+                  }
+                >
+                  <option value="false">Disabled</option>
+                  <option value="true">Enabled</option>
+                </select>
+              </label>
+              <label>
+                NOTIFY CONNECTION ERROR
+                <select
+                  value={draftConfig.notify_on_connection_error ? "true" : "false"}
+                  onChange={(event) =>
+                    setDraftConfig({
+                      ...draftConfig,
+                      notify_on_connection_error: event.target.value === "true",
+                    })
+                  }
+                >
+                  <option value="true">Enabled</option>
+                  <option value="false">Disabled</option>
+                </select>
+              </label>
+              <label>
+                HEARTBEAT INTERVAL
+                <select
+                  value={draftConfig.heartbeat_interval}
+                  onChange={(event) =>
+                    setDraftConfig({
+                      ...draftConfig,
+                      heartbeat_interval: event.target.value as HeartbeatInterval,
+                    })
+                  }
+                >
+                  <option value="off">Off</option>
+                  <option value="30min">30 min</option>
+                  <option value="1h">1 hour</option>
+                  <option value="6h">6 hours</option>
+                </select>
+              </label>
+              <label>
+                NOTIFICATION CHANNEL
+                <select
+                  value={draftConfig.notification_channel}
+                  onChange={(event) =>
+                    setDraftConfig({
+                      ...draftConfig,
+                      notification_channel: event.target.value as NotificationChannel,
+                    })
+                  }
+                >
+                  <option value="local_windows_toast">Local Windows Toast</option>
+                  <option value="webhook">Webhook</option>
+                  <option value="telegram_bot" disabled>
+                    Telegram Bot (Coming Soon)
+                  </option>
+                  <option value="ntfy_sh" disabled>
+                    ntfy.sh (Coming Soon)
+                  </option>
+                </select>
+              </label>
+              <label className="full-width">
+                WEBHOOK URL
+                <input
+                  disabled={draftConfig.notification_channel !== "webhook"}
+                  value={draftConfig.webhook_url}
+                  onChange={(event) =>
+                    setDraftConfig({ ...draftConfig, webhook_url: event.target.value })
+                  }
+                  placeholder="https://example.com/btc-lottery-pet"
+                />
+              </label>
             </div>
             <div className="benchmark-row">
               <button

@@ -28,8 +28,9 @@ This project does not promise or guarantee any financial return.
 - Jackpot / block-candidate detection when a header hash meets the network
   target from the current Stratum job's `nbits`
 - App log directory file logging with a 1 MiB rotation limit (`mining.log` and
-  `mining.log` / `mining.log.1`) plus `found_block.json` for a block
-  candidate event
+  `mining.log.1`) plus `found_block.json` for a block candidate event
+- Optional one-way notifications for Jackpot, share accepted, connection error,
+  and coarse heartbeat status via local Windows notification or webhook
 
 BTC Lottery Pet does not hide its process, enable itself at Windows startup,
 accept remote-control commands, or start mining automatically.
@@ -120,6 +121,10 @@ events for every hash or nonce. When `STOP` is clicked, the backend logs
 signal is observed. Worker cleanup continues on the background mining thread so
 the UI is not blocked by worker joins.
 
+Notifications are one-way only. Local Windows notifications and webhooks can be
+triggered by app events, but there is no remote command polling, remote control,
+or inbound webhook listener.
+
 ## Configuration
 
 The repository-level [`config.json`](./config.json) contains defaults:
@@ -134,6 +139,13 @@ The repository-level [`config.json`](./config.json) contains defaults:
   "cpu_threads": 1,
   "performance_preset": "eco",
   "real_mining_enabled": false,
+  "enable_notifications": true,
+  "notify_on_jackpot": true,
+  "notify_on_share_accepted": false,
+  "notify_on_connection_error": true,
+  "heartbeat_interval": "off",
+  "notification_channel": "local_windows_toast",
+  "webhook_url": "",
   "compute_mode": "cpu",
   "gpu_enabled": false,
   "gpu_device_id": null,
@@ -182,6 +194,43 @@ High CPU usage may heat your computer. Continue?
 
 The UI prompt is informational. The Rust backend performs its own normalization
 and validation, so an out-of-range thread count cannot bypass the local limit.
+
+## Notifications
+
+Notification settings are local configuration. `Notify on Jackpot` and
+`Notify on Connection Error` default to enabled, `Notify on Share Accepted`
+defaults to disabled, and heartbeat defaults to `off`.
+
+Supported channels today:
+
+| Channel | Current behavior |
+| --- | --- |
+| `Local Windows Toast` | Shows a local Windows notification-style balloon. Jackpot and connection warnings also play a short system sound. |
+| `Webhook` | Sends one-way JSON POST notifications for Jackpot and heartbeat events. |
+| `Telegram Bot` | Listed as `Coming Soon`; not enabled. |
+| `ntfy.sh` | Listed as `Coming Soon`; not enabled. |
+
+The Jackpot webhook body is intentionally narrow:
+
+```json
+{
+  "event": "jackpot",
+  "pool": "...",
+  "job_id": "...",
+  "hash": "...",
+  "difficulty": 0,
+  "timestamp": "...",
+  "note": "found_block.json saved locally"
+}
+```
+
+Webhook notifications never include the BTC address, pool username, private
+keys, or seed phrases. If a webhook fails, the app writes a local warning
+without the webhook URL and mining continues.
+
+Heartbeat notifications are coarse-grained only: `off`, `30min`, `1h`, or
+`6h`. They include status, hashrate, accepted/rejected shares, best difficulty,
+uptime, and pool host/port. They are never sent once per second.
 
 ## GPU framework status
 
