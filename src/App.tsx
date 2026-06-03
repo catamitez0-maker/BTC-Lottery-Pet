@@ -2,7 +2,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useState, useRef } from "react";
 
-type PetStatus = "Sleeping" | "Mining" | "Overdrive" | "Lucky Flash" | "Cooling Down" | "Connection Error" | "New Best Diff" | "Jackpot";
+type PetStatus = "Sleeping" | "Connecting" | "Mining" | "Overdrive" | "Lucky Flash" | "Cooling Down" | "Connection Error" | "New Best Diff" | "Jackpot";
 type ComputeMode = "cpu" | "gpu_sim" | "gpu_benchmark" | "gpu_real_experimental";
 type PerformancePreset = "eco" | "normal" | "turbo" | "custom";
 type HeartbeatInterval = "off" | "30min" | "1h" | "6h";
@@ -225,6 +225,8 @@ function getPetExpression(status: PetStatus): string {
   switch (status) {
     case "Sleeping":
       return "( -ω- )zzZ";
+    case "Connecting":
+      return "( ._.)";
     case "Cooling Down":
       return "( ~_~ )";
     case "Connection Error":
@@ -248,6 +250,8 @@ function getSlotChar(status: PetStatus, index: number): string {
   switch (status) {
     case "Sleeping":
       return ["Z", "z", "Z"][index];
+    case "Connecting":
+      return ["C", "N", "N"][index];
     case "Cooling Down":
       return ["C", "O", "L"][index];
     case "Connection Error":
@@ -408,7 +412,21 @@ function App() {
     let unlisten = () => {};
 
     listen<RealMiningStats>("mining-stats", (event) => {
-      setRealStats(event.payload);
+      setRealStats((current) => {
+        if (!isMiningRef.current || !realModeEnabledRef.current) {
+          return event.payload;
+        }
+
+        if (event.payload.connection_status === "Stopped") {
+          return current;
+        }
+
+        return {
+          ...event.payload,
+          accepted_shares: Math.max(current.accepted_shares, event.payload.accepted_shares),
+          rejected_shares: Math.max(current.rejected_shares, event.payload.rejected_shares),
+        };
+      });
     })
       .then((cleanup) => {
         unlisten = cleanup;
@@ -428,26 +446,57 @@ function App() {
 
     listen<string>("mining-log", (event) => {
       const message = event.payload;
+      const cleanMessage = message.replace(/^\[[^\]]+\]\s*/, "");
       setLatestLog(message);
 
       const lowerMessage = message.toLowerCase();
+      const shouldSyncRealMining = isMiningRef.current && realModeEnabledRef.current;
       if (lowerMessage.includes("share submitted") || lowerMessage.includes("share accepted") || lowerMessage.includes("share rejected")) {
-        setLastShare(message.replace(/^\[[^\]]+\]\s*/, ""));
+        setLastShare(cleanMessage);
+      }
+
+      if (shouldSyncRealMining && lowerMessage.includes("connected to pool")) {
+        setRealStats((current) => ({ ...current, connection_status: "Connected" }));
+      } else if (shouldSyncRealMining && lowerMessage.includes("worker authorized successfully")) {
+        setRealStats((current) => ({ ...current, connection_status: "Authorized" }));
+      } else if (shouldSyncRealMining && lowerMessage.includes("job received")) {
+        const jobMatch = cleanMessage.match(/Job received: id=([^,]+)/);
+        setRealStats((current) => ({
+          ...current,
+          current_job_id: jobMatch?.[1] ?? current.current_job_id,
+          connection_status: "Mining",
+        }));
       }
 
       if (lowerMessage.includes("share accepted")) {
-        void invoke("notify_share_accepted", {
-          settings: notificationSettingsFromConfig(configRef.current),
-        }).catch(() => {});
+        if (shouldSyncRealMining) {
+          setRealStats((current) => ({
+            ...current,
+            accepted_shares: current.accepted_shares + 1,
+          }));
+          void invoke("notify_share_accepted", {
+            settings: notificationSettingsFromConfig(configRef.current),
+          }).catch(() => {});
+        }
+      }
+
+      if (shouldSyncRealMining && lowerMessage.includes("share rejected")) {
+        setRealStats((current) => ({
+          ...current,
+          rejected_shares: current.rejected_shares + 1,
+        }));
       }
 
       if (lowerMessage.includes("connection error")) {
+        if (shouldSyncRealMining) {
+          setRealStats((current) => ({ ...current, connection_status: "Connection Error" }));
+        }
         const now = Date.now();
         if (now - lastConnectionNotificationRef.current > 60_000) {
           lastConnectionNotificationRef.current = now;
           void invoke("notify_connection_error", {
             settings: notificationSettingsFromConfig(configRef.current),
-            status: message.replace(/^\[[^\]]+\]\s*/, ""),
+            status: cleanMessage,
           }).catch(() => {});
         }
       }
@@ -747,6 +796,7 @@ function App() {
         return;
       }
 
+      isMiningRef.current = true;
       setIsMining(true);
       setSimulationStats((current) => ({
         ...current,
@@ -769,8 +819,17 @@ function App() {
       return;
     }
 
+    isMiningRef.current = true;
     setIsMining(true);
-    setRealStats((current) => ({ ...current, connection_status: "Starting" }));
+    setPrevAcceptedShares(0);
+    setRealStats((current) => ({
+      ...current,
+      hashrate: 0,
+      accepted_shares: 0,
+      rejected_shares: 0,
+      current_job_id: "",
+      connection_status: "Connecting",
+    }));
 
     try {
       await invoke("start_real_mining", {
@@ -784,6 +843,7 @@ function App() {
         },
       });
     } catch (error) {
+      isMiningRef.current = false;
       setIsMining(false);
       setErrorMessage(String(error));
       setRealStats((current) => ({ ...current, connection_status: "Stopped" }));
@@ -791,6 +851,7 @@ function App() {
   };
 
   const stopMining = async () => {
+    isMiningRef.current = false;
     setIsMining(false);
     setIsCoolingDown(true);
 
@@ -993,6 +1054,14 @@ function App() {
     (realStats.connection_status.startsWith("Retrying") ||
       realStats.connection_status.toLowerCase().includes("error") ||
       realStats.connection_status.toLowerCase().includes("failed"));
+  const connectionStatus = realStats.connection_status.toLowerCase();
+  const isConnecting =
+    isMining &&
+    realModeEnabled &&
+    !realStats.current_job_id &&
+    ["starting", "connecting", "subscribing", "authorizing", "connected", "authorized"].some((status) =>
+      connectionStatus.startsWith(status),
+    );
 
   let petStatus: PetStatus;
   if (blockFound) {
@@ -1003,6 +1072,8 @@ function App() {
     petStatus = "Cooling Down";
   } else if (isConnectionError) {
     petStatus = "Connection Error";
+  } else if (isConnecting) {
+    petStatus = "Connecting";
   } else if (isLucky) {
     petStatus = "Lucky Flash";
   } else if (isNewBest) {
