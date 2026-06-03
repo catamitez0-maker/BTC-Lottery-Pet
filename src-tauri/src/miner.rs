@@ -869,7 +869,7 @@ mod tests {
 
     use super::{
         difficulty_from_hash, extranonce2_hex, read_stratum_line, validate_mainnet_address,
-        validate_share_difficulty, word_swapped_hex, MAX_PENDING_SUBMISSIONS,
+        validate_share_difficulty, word_swapped_hex, RealMiningSettings, MAX_PENDING_SUBMISSIONS,
         MAX_SHARE_SUBMISSIONS_PER_TICK, MAX_STRATUM_LINE_BYTES,
     };
 
@@ -929,5 +929,22 @@ mod tests {
         assert!(!super::should_rotate_log(0, 1));
         assert!(!super::should_rotate_log(super::MAX_LOG_FILE_BYTES - 1, 1));
         assert!(super::should_rotate_log(super::MAX_LOG_FILE_BYTES, 1));
+    }
+
+    #[test]
+    fn rejects_real_mining_threads_above_local_parallelism() {
+        let available_threads = std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1);
+        let settings = RealMiningSettings {
+            pool_host: "public-pool.io".into(),
+            pool_port: 21496,
+            btc_address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa".into(),
+            worker_name: "btc-lottery-pet".into(),
+            cpu_threads: available_threads + 1,
+            confirmed_cpu_use: true,
+        };
+
+        assert!(settings.validate().is_err());
     }
 }

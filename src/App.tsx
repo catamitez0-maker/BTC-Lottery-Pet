@@ -1,8 +1,9 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 
-type PetStatus = "Sleeping" | "Mining" | "Lucky Flash" | "Cooling Down" | "Connection Error" | "New Best Diff";
+type PetStatus = "Sleeping" | "Mining" | "Overdrive" | "Lucky Flash" | "Cooling Down" | "Connection Error" | "New Best Diff";
+type ComputeMode = "cpu" | "gpu_sim" | "gpu_benchmark" | "gpu_real_experimental";
 
 interface AppConfig {
   btc_address: string;
@@ -12,6 +13,32 @@ interface AppConfig {
   cpu_limit_percent: number;
   cpu_threads: number;
   real_mining_enabled: boolean;
+  compute_mode: ComputeMode;
+  gpu_enabled: boolean;
+  gpu_device_id: string | null;
+  gpu_intensity_percent: number;
+}
+
+interface SystemInfo {
+  available_parallelism: number;
+  default_cpu_threads: number;
+  recommended_cpu_threads: number;
+}
+
+interface GpuDevice {
+  id: string;
+  name: string;
+  simulated: boolean;
+}
+
+interface GpuBenchmarkResult {
+  device_id: string;
+  device_name: string;
+  simulated: boolean;
+  gpu_intensity_percent: number;
+  hashrate: number;
+  duration_ms: number;
+  note: string;
 }
 
 interface SimulationStats {
@@ -37,7 +64,22 @@ const fallbackConfig: AppConfig = {
   cpu_limit_percent: 10,
   cpu_threads: 1,
   real_mining_enabled: false,
+  compute_mode: "cpu",
+  gpu_enabled: false,
+  gpu_device_id: null,
+  gpu_intensity_percent: 10,
 };
+
+const fallbackSystemInfo: SystemInfo = {
+  available_parallelism: Math.max(1, navigator.hardwareConcurrency || 1),
+  default_cpu_threads: 1,
+  recommended_cpu_threads: Math.min(2, Math.max(1, navigator.hardwareConcurrency || 1)),
+};
+
+const fallbackGpuDevices: GpuDevice[] = [
+  { id: "auto", name: "Auto", simulated: true },
+  { id: "simulated-gpu", name: "Simulated GPU", simulated: true },
+];
 
 const idleRealStats: RealMiningStats = {
   hashrate: 0,
@@ -106,6 +148,8 @@ function getPetExpression(status: PetStatus): string {
       return "( ★∀★ )";
     case "New Best Diff":
       return "( ≧▽≦ )";
+    case "Overdrive":
+      return "( >_> )!";
     case "Mining":
       return "( •̀_•́ )";
     default:
@@ -125,6 +169,8 @@ function getSlotChar(status: PetStatus, index: number): string {
       return ["₿", "₿", "₿"][index];
     case "New Best Diff":
       return ["B", "S", "T"][index];
+    case "Overdrive":
+      return ["G", "P", "U"][index];
     default:
       return "-";
   }
@@ -157,6 +203,9 @@ function App() {
   const [isLucky, setIsLucky] = useState(false);
   const [isNewBest, setIsNewBest] = useState(false);
   const [displayMode, setDisplayMode] = useState<"compact" | "detail">("compact");
+  const [systemInfo, setSystemInfo] = useState<SystemInfo>(fallbackSystemInfo);
+  const [gpuDevices, setGpuDevices] = useState<GpuDevice[]>(fallbackGpuDevices);
+  const [benchmarkResult, setBenchmarkResult] = useState<GpuBenchmarkResult | null>(null);
 
   const coolingDownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const simShareTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -203,6 +252,17 @@ function App() {
           setErrorMessage(`Could not load settings: ${formatError(error)}`);
         }
       });
+  }, []);
+
+  // Browser preview uses conservative fallbacks; Tauri supplies the local values.
+  useEffect(() => {
+    invoke<SystemInfo>("get_system_info")
+      .then(setSystemInfo)
+      .catch(() => setSystemInfo(fallbackSystemInfo));
+
+    invoke<GpuDevice[]>("get_gpu_devices")
+      .then(setGpuDevices)
+      .catch(() => setGpuDevices(fallbackGpuDevices));
   }, []);
 
   // Listen to Mining Stats
@@ -305,6 +365,8 @@ function App() {
     };
   }, []);
 
+  const gpuSimEnabled = config.compute_mode === "gpu_sim" && config.gpu_enabled;
+
   // Simulation Mining Loop
   useEffect(() => {
     if (!isMining || realModeEnabled) {
@@ -362,10 +424,13 @@ function App() {
 
       const luckyFlash = Math.random() < 0.08;
       const candidateDifficulty = Math.random() * Math.random() * 4_500;
-      const addedHashrate = 0.85 + Math.random() * 0.7;
+      const intensityScale = config.gpu_intensity_percent / 10;
+      const addedHashrate = gpuSimEnabled
+        ? (108 + Math.random() * 24) * intensityScale
+        : 0.85 + Math.random() * 0.7;
 
       setSimulationStats((current) => ({
-        status: luckyFlash ? "Lucky Flash" : "Mining",
+        status: luckyFlash ? "Lucky Flash" : gpuSimEnabled ? "Overdrive" : "Mining",
         hashrate: addedHashrate,
         bestDifficulty: Math.max(current.bestDifficulty, candidateDifficulty),
       }));
@@ -389,7 +454,7 @@ function App() {
       setIsLucky(false);
       setLatestLog(`[${new Date().toLocaleTimeString()}] Mining stopped`);
     };
-  }, [isMining, realModeEnabled]);
+  }, [config.gpu_intensity_percent, gpuSimEnabled, isMining, realModeEnabled]);
 
   // Track New Best Difficulty
   const activeBestDiff = realModeEnabled ? realStats.best_difficulty : simulationStats.bestDifficulty;
@@ -440,8 +505,17 @@ function App() {
     }
 
     if (!realModeEnabled) {
+      if (config.compute_mode === "gpu_benchmark") {
+        setErrorMessage("GPU Benchmark does not mine. Open settings and click Run Benchmark.");
+        setShowSettings(true);
+        return;
+      }
+
       setIsMining(true);
-      setSimulationStats((current) => ({ ...current, status: "Mining" }));
+      setSimulationStats((current) => ({
+        ...current,
+        status: gpuSimEnabled ? "Overdrive" : "Mining",
+      }));
       return;
     }
 
@@ -538,6 +612,12 @@ function App() {
     if (realModeEnabled) {
       void disableRealMode();
     } else {
+      if (config.compute_mode !== "cpu") {
+        setErrorMessage("Select CPU compute mode before enabling real mining.");
+        setShowSettings(true);
+        return;
+      }
+
       setShowWarning(true);
     }
   };
@@ -545,11 +625,28 @@ function App() {
   const saveSettings = async () => {
     setErrorMessage("");
 
-    const settings = {
+    const cpuThreads = Number(draftConfig.cpu_threads);
+    if (
+      cpuThreads > systemInfo.recommended_cpu_threads &&
+      !window.confirm("High CPU usage may affect your computer. Save this CPU thread count?")
+    ) {
+      return;
+    }
+
+    const settings: AppConfig = {
       ...draftConfig,
       pool_port: Number(draftConfig.pool_port),
-      cpu_threads: Number(draftConfig.cpu_threads),
+      cpu_threads: cpuThreads,
       real_mining_enabled: false,
+      compute_mode:
+        draftConfig.compute_mode === "gpu_real_experimental"
+          ? "cpu"
+          : draftConfig.compute_mode,
+      gpu_enabled:
+        draftConfig.compute_mode !== "cpu" &&
+        draftConfig.compute_mode !== "gpu_real_experimental" &&
+        draftConfig.gpu_enabled,
+      gpu_device_id: draftConfig.compute_mode === "cpu" ? null : draftConfig.gpu_device_id,
     };
 
     try {
@@ -568,6 +665,35 @@ function App() {
 
     setErrorMessage("");
     setShowSettings(false);
+  };
+
+  const runGpuBenchmark = async () => {
+    setErrorMessage("");
+
+    try {
+      const result = await invoke<GpuBenchmarkResult>("run_gpu_benchmark", {
+        gpuDeviceId: draftConfig.gpu_device_id,
+        gpuIntensityPercent: Number(draftConfig.gpu_intensity_percent),
+      });
+      setBenchmarkResult(result);
+    } catch (error) {
+      if (runningInTauri) {
+        setErrorMessage(`Could not run GPU benchmark: ${formatError(error)}`);
+        return;
+      }
+
+      const gpuIntensityPercent = Number(draftConfig.gpu_intensity_percent);
+      setBenchmarkResult({
+        device_id: draftConfig.gpu_device_id || "auto",
+        device_name:
+          gpuDevices.find((device) => device.id === draftConfig.gpu_device_id)?.name || "Auto",
+        simulated: true,
+        gpu_intensity_percent: gpuIntensityPercent,
+        hashrate: 120_000_000 * gpuIntensityPercent / 10,
+        duration_ms: 250,
+        note: "Simulated benchmark only. No GPU workload was started.",
+      });
+    }
   };
 
   const toggleAlwaysOnTop = async () => {
@@ -606,6 +732,8 @@ function App() {
     petStatus = "Lucky Flash";
   } else if (isNewBest) {
     petStatus = "New Best Diff";
+  } else if (gpuSimEnabled && !realModeEnabled) {
+    petStatus = "Overdrive";
   } else {
     petStatus = "Mining";
   }
@@ -614,20 +742,40 @@ function App() {
     ? `${realStats.accepted_shares} / ${realStats.rejected_shares}`
     : `${simAccepted} / ${simRejected}`;
 
+  const displayedHashrate = realModeEnabled
+    ? formatHashrate(realStats.hashrate)
+    : `${simulationStats.hashrate.toFixed(2)} MH/s`;
+  const compactComputeMode = realModeEnabled ? "CPU" : gpuSimEnabled ? "GPU SIM" : "CPU";
   const metrics = [
-    ["HASHRATE", realModeEnabled ? formatHashrate(realStats.hashrate) : `${simulationStats.hashrate.toFixed(2)} MH/s`],
+    ["HASHRATE", displayedHashrate],
     ["BEST DIFF", formatDifficulty(realModeEnabled ? realStats.best_difficulty : simulationStats.bestDifficulty)],
     ["BLOCK HEIGHT", blockHeight],
     ["SHARES A / R", sharesValue],
     ["APP UPTIME", formatUptime(appUptime)],
     ["MINING UPTIME", formatUptime(miningUptime)],
+    ...(gpuSimEnabled
+      ? [
+          ["GPU", "SIM"],
+          ["GPU HASHRATE", displayedHashrate],
+          ["GPU INTENSITY", `${config.gpu_intensity_percent}%`],
+        ]
+      : []),
   ];
+
+  const cpuThreadOptions = useMemo(() => {
+    const available = Math.max(1, systemInfo.available_parallelism);
+    return Array.from(new Set([1, 2, 4, available]))
+      .filter((threads) => threads <= available)
+      .sort((left, right) => left - right);
+  }, [systemInfo.available_parallelism]);
 
   return (
     <main className={`pet-shell ${displayMode} ${petStatus === "Lucky Flash" ? "lucky" : ""}`}>
       <header className="topbar">
         <div>
-          <p className="eyebrow">{realModeEnabled ? "REAL MINING MODE" : "SIMULATION MODE"}</p>
+          <p className="eyebrow">
+            {realModeEnabled ? "REAL CPU MINING" : gpuSimEnabled ? "GPU SIM MODE" : "SIMULATION MODE"}
+          </p>
           <h1>BTC Lottery Pet</h1>
         </div>
         <div className="header-actions">
@@ -671,7 +819,7 @@ function App() {
               <div className="pet-expression">{getPetExpression(petStatus)}</div>
               <div className="pet-slots">
                 <div className="slot-reel reel-1">
-                  {petStatus === "Mining" ? (
+                  {petStatus === "Mining" || petStatus === "Overdrive" ? (
                     <div className="reel-strip">
                       <span>₿</span><span>9</span><span>7</span><span>2</span><span>3</span><span>₿</span>
                     </div>
@@ -680,7 +828,7 @@ function App() {
                   )}
                 </div>
                 <div className="slot-reel reel-2">
-                  {petStatus === "Mining" ? (
+                  {petStatus === "Mining" || petStatus === "Overdrive" ? (
                     <div className="reel-strip delay-1">
                       <span>7</span><span>₿</span><span>1</span><span>8</span><span>5</span><span>7</span>
                     </div>
@@ -689,7 +837,7 @@ function App() {
                   )}
                 </div>
                 <div className="slot-reel reel-3">
-                  {petStatus === "Mining" ? (
+                  {petStatus === "Mining" || petStatus === "Overdrive" ? (
                     <div className="reel-strip delay-2">
                       <span>9</span><span>2</span><span>₿</span><span>7</span><span>6</span><span>9</span>
                     </div>
@@ -712,7 +860,7 @@ function App() {
 
         {displayMode === "compact" && (
           <div className="mini-stats-line">
-            <span>H: {realModeEnabled ? formatHashrate(realStats.hashrate) : `${simulationStats.hashrate.toFixed(2)} MH/s`}</span>
+            <span>{compactComputeMode}: {displayedHashrate}</span>
             <span className="divider">|</span>
             <span>D: {formatDifficulty(realModeEnabled ? realStats.best_difficulty : simulationStats.bestDifficulty)}</span>
             <span className="divider">|</span>
@@ -755,7 +903,7 @@ function App() {
 
       <footer>
         <span className={`dot ${realModeEnabled ? "armed" : ""}`} />
-        {realModeEnabled ? "Explicit CPU mode" : "Local-only simulation"}
+        {realModeEnabled ? "Explicit CPU mode" : gpuSimEnabled ? "Local GPU simulation" : "Local-only simulation"}
         <button
           className="settings-button"
           disabled={isMining}
@@ -764,7 +912,7 @@ function App() {
         >
           SETTINGS
         </button>
-        <span className="cpu">{config.cpu_threads} thread</span>
+        <span className="cpu">{config.cpu_threads} thread{config.cpu_threads === 1 ? "" : "s"}</span>
       </footer>
 
       {errorMessage && <p className="error-banner">{errorMessage}</p>}
@@ -860,19 +1008,109 @@ function App() {
               </label>
               <label>
                 CPU THREADS
-                <input
-                  min="1"
-                  max={navigator.hardwareConcurrency || 1}
-                  type="number"
+                <select
                   value={draftConfig.cpu_threads}
                   onChange={(event) =>
                     setDraftConfig({ ...draftConfig, cpu_threads: Number(event.target.value) })
                   }
+                >
+                  {cpuThreadOptions.map((threads) => (
+                    <option key={threads} value={threads}>
+                      {threads} thread{threads === 1 ? "" : "s"}
+                      {threads === systemInfo.available_parallelism ? " (max)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                COMPUTE MODE
+                <select
+                  value={draftConfig.compute_mode}
+                  onChange={(event) => {
+                    const computeMode = event.target.value as ComputeMode;
+                    setDraftConfig({
+                      ...draftConfig,
+                      compute_mode: computeMode,
+                      gpu_enabled: computeMode === "gpu_sim" || computeMode === "gpu_benchmark",
+                      gpu_device_id: computeMode === "cpu" ? null : draftConfig.gpu_device_id,
+                    });
+                  }}
+                >
+                  <option value="cpu">CPU</option>
+                  <option value="gpu_sim">GPU Sim</option>
+                  <option value="gpu_benchmark">GPU Benchmark</option>
+                  <option value="gpu_real_experimental" disabled>
+                    GPU Real Experimental (Coming Soon)
+                  </option>
+                </select>
+              </label>
+              <label>
+                GPU DEVICE
+                <select
+                  disabled={!draftConfig.gpu_enabled}
+                  value={draftConfig.gpu_device_id || "auto"}
+                  onChange={(event) =>
+                    setDraftConfig({
+                      ...draftConfig,
+                      gpu_device_id: event.target.value === "auto" ? null : event.target.value,
+                    })
+                  }
+                >
+                  {gpuDevices.map((device) => (
+                    <option key={device.id} value={device.id}>
+                      {device.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                GPU INTENSITY
+                <select
+                  disabled={!draftConfig.gpu_enabled}
+                  value={draftConfig.gpu_intensity_percent}
+                  onChange={(event) =>
+                    setDraftConfig({
+                      ...draftConfig,
+                      gpu_intensity_percent: Number(event.target.value),
+                    })
+                  }
+                >
+                  {[10, 25, 50, 75, 100].map((intensity) => (
+                    <option key={intensity} value={intensity}>
+                      {intensity}%
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="checkbox-label">
+                <input
+                  checked={draftConfig.gpu_enabled}
+                  disabled={draftConfig.compute_mode === "cpu"}
+                  onChange={(event) =>
+                    setDraftConfig({ ...draftConfig, gpu_enabled: event.target.checked })
+                  }
+                  type="checkbox"
                 />
+                GPU ENABLED
               </label>
             </div>
+            <div className="benchmark-row">
+              <button
+                className="secondary-button"
+                disabled={!draftConfig.gpu_enabled}
+                onClick={() => void runGpuBenchmark()}
+                type="button"
+              >
+                RUN BENCHMARK
+              </button>
+              {benchmarkResult && (
+                <span className="benchmark-result">
+                  GPU SIM: {formatHashrate(benchmarkResult.hashrate)} at {benchmarkResult.gpu_intensity_percent}%
+                </span>
+              )}
+            </div>
             <div className="panel-actions">
-              <span>Real mode always starts manually.</span>
+              <span>Real CPU mining always starts manually.</span>
               <button className="confirm-button" onClick={saveSettings} type="button">
                 SAVE
               </button>

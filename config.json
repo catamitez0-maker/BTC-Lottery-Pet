@@ -5,5 +5,9 @@
   "worker_name": "btc-lottery-pet",
   "cpu_limit_percent": 10,
   "cpu_threads": 1,
-  "real_mining_enabled": false
+  "real_mining_enabled": false,
+  "compute_mode": "cpu",
+  "gpu_enabled": false,
+  "gpu_device_id": null,
+  "gpu_intensity_percent": 10
 }
