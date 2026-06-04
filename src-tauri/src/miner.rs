@@ -18,9 +18,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
-const DIFF_ONE_TARGET: f64 =
+pub(crate) const DIFF_ONE_TARGET: f64 =
     26_959_535_291_011_309_493_156_476_344_723_991_336_010_898_738_574_164_086_137_773_096_960.0;
-const MAX_STRATUM_LINE_BYTES: usize = 1024 * 1024;
+const MAX_STRATUM_LINE_BYTES: usize = 64 * 1024;
 const MAX_EXTRANONCE2_BYTES: usize = 16;
 const MAX_PENDING_SUBMISSIONS: usize = 128;
 const MAX_SHARE_SUBMISSIONS_PER_TICK: usize = 16;
@@ -80,6 +80,16 @@ pub struct RealMiningSettings {
     pub worker_name: String,
     pub cpu_threads: usize,
     pub confirmed_cpu_use: bool,
+    #[serde(default)]
+    pub gpu_enabled: bool,
+    #[serde(default)]
+    pub gpu_device_id: Option<String>,
+    #[serde(default = "default_gpu_intensity")]
+    pub gpu_intensity_percent: u8,
+}
+
+fn default_gpu_intensity() -> u8 {
+    10
 }
 
 impl RealMiningSettings {
@@ -117,7 +127,8 @@ impl RealMiningSettings {
             .map(|count| count.get())
             .unwrap_or(1);
 
-        if self.cpu_threads == 0 || self.cpu_threads > available_threads {
+        // Skip CPU thread validation if GPU is enabled (GPU doesn't need CPU threads)
+        if !self.gpu_enabled && (self.cpu_threads == 0 || self.cpu_threads > available_threads) {
             return Err(format!(
                 "CPU threads must be between 1 and {available_threads} on this computer"
             ));
@@ -200,35 +211,35 @@ impl MiningController {
 }
 
 #[derive(Clone)]
-struct JobTemplate {
-    generation: u64,
-    job_id: String,
-    prev_hash: String,
-    coinbase1: String,
-    coinbase2: String,
-    merkle_branches: Vec<String>,
-    version: String,
-    nbits: String,
-    network_target: [u8; 32],
-    ntime: String,
-    extranonce1: String,
-    extranonce2_size: usize,
-    share_difficulty: f64,
+pub(crate) struct JobTemplate {
+    pub(crate) generation: u64,
+    pub(crate) job_id: String,
+    pub(crate) prev_hash: String,
+    pub(crate) coinbase1: String,
+    pub(crate) coinbase2: String,
+    pub(crate) merkle_branches: Vec<String>,
+    pub(crate) version: String,
+    pub(crate) nbits: String,
+    pub(crate) network_target: [u8; 32],
+    pub(crate) ntime: String,
+    pub(crate) extranonce1: String,
+    pub(crate) extranonce2_size: usize,
+    pub(crate) share_difficulty: f64,
 }
 
-struct SharedMiningState {
-    stop: Arc<AtomicBool>,
-    job: RwLock<Option<JobTemplate>>,
-    job_generation: AtomicU64,
-    hashes: AtomicU64,
-    accepted_shares: AtomicU64,
-    rejected_shares: AtomicU64,
-    best_difficulty_bits: AtomicU64,
-    connection_status: Mutex<String>,
+pub(crate) struct SharedMiningState {
+    pub(crate) stop: Arc<AtomicBool>,
+    pub(crate) job: RwLock<Option<JobTemplate>>,
+    pub(crate) job_generation: AtomicU64,
+    pub(crate) hashes: AtomicU64,
+    pub(crate) accepted_shares: AtomicU64,
+    pub(crate) rejected_shares: AtomicU64,
+    pub(crate) best_difficulty_bits: AtomicU64,
+    pub(crate) connection_status: Mutex<String>,
 }
 
 impl SharedMiningState {
-    fn new(stop: Arc<AtomicBool>) -> Self {
+    pub(crate) fn new(stop: Arc<AtomicBool>) -> Self {
         Self {
             stop,
             job: RwLock::new(None),
@@ -241,21 +252,21 @@ impl SharedMiningState {
         }
     }
 
-    fn set_connection_status(&self, status: impl Into<String>) {
+    pub(crate) fn set_connection_status(&self, status: impl Into<String>) {
         *self.connection_status.lock().unwrap() = status.into();
     }
 
-    fn set_job(&self, mut job: JobTemplate) {
+    pub(crate) fn set_job(&self, mut job: JobTemplate) {
         job.generation = self.job_generation.fetch_add(1, Ordering::AcqRel) + 1;
         *self.job.write().unwrap() = Some(job);
     }
 
-    fn clear_job(&self) {
+    pub(crate) fn clear_job(&self) {
         self.job_generation.fetch_add(1, Ordering::AcqRel);
         *self.job.write().unwrap() = None;
     }
 
-    fn update_best_difficulty(&self, difficulty: f64) {
+    pub(crate) fn update_best_difficulty(&self, difficulty: f64) {
         let mut current = self.best_difficulty_bits.load(Ordering::Relaxed);
 
         while difficulty > f64::from_bits(current) {
@@ -292,11 +303,11 @@ impl SharedMiningState {
 }
 
 #[derive(Clone)]
-struct ShareSubmission {
-    job_id: String,
-    extranonce2: String,
-    ntime: String,
-    nonce: u32,
+pub(crate) struct ShareSubmission {
+    pub(crate) job_id: String,
+    pub(crate) extranonce2: String,
+    pub(crate) ntime: String,
+    pub(crate) nonce: u32,
 }
 
 #[derive(Default)]
@@ -366,7 +377,7 @@ fn run_stratum_connection(
     let mut reader = BufReader::new(reader_stream);
     let username = settings.username();
     let mut protocol = ProtocolState {
-        difficulty: 1.0,
+        difficulty: 0.001,
         ..ProtocolState::default()
     };
     let mut pending_submissions = HashSet::new();
@@ -395,6 +406,7 @@ fn run_stratum_connection(
 
     let mut last_job_received = Instant::now();
     let mut debug_hint_logged = false;
+    let mut smoothed_hashrate: f64 = 0.0;
 
     while !shared.stop.load(Ordering::Acquire) {
         let has_job = shared.job.read().unwrap().is_some();
@@ -458,8 +470,14 @@ fn run_stratum_connection(
         if last_report.elapsed() >= Duration::from_secs(1) {
             let elapsed = last_report.elapsed().as_secs_f64();
             let current_hash_count = shared.hashes.load(Ordering::Relaxed);
-            let hashrate = current_hash_count.saturating_sub(last_hash_count) as f64 / elapsed;
-            emit_stats(app, shared, hashrate);
+            let raw_hashrate = current_hash_count.saturating_sub(last_hash_count) as f64 / elapsed;
+            // Exponential moving average for smooth display (α = 0.3)
+            smoothed_hashrate = if smoothed_hashrate == 0.0 {
+                raw_hashrate
+            } else {
+                0.3 * raw_hashrate + 0.7 * smoothed_hashrate
+            };
+            emit_stats(app, shared, smoothed_hashrate);
             last_hash_count = current_hash_count;
             last_report = Instant::now();
         }
@@ -488,6 +506,7 @@ fn handle_server_message(
                 let difficulty = value_as_f64(&message["params"][0])
                     .ok_or_else(|| "pool sent an invalid share difficulty".to_string())?;
                 protocol.difficulty = validate_share_difficulty(difficulty)?;
+                log_message(app, &format!("Pool set share difficulty: {difficulty}"));
             }
             "mining.set_extranonce" => {
                 protocol.extranonce1 = message["params"][0].as_str().map(str::to_owned);
@@ -645,6 +664,10 @@ fn read_stratum_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
     }
 
     if line.len() > MAX_STRATUM_LINE_BYTES {
+        // Drain the rest of the oversized line so the next read starts at a
+        // fresh message boundary, preventing framing corruption.
+        let mut discard = Vec::new();
+        let _ = reader.read_until(b'\n', &mut discard);
         return Err(io::Error::new(
             ErrorKind::InvalidData,
             "pool sent an oversized Stratum message",
@@ -669,9 +692,9 @@ fn value_as_f64(value: &Value) -> Option<f64> {
 
 fn validate_mainnet_address(value: &str) -> Result<(), String> {
     Address::from_str(value)
-        .map_err(|_| "enter a valid mainnet BTC address before starting real mining".to_string())?
+        .map_err(|error| format!("invalid BTC address format: {error}"))?
         .require_network(Network::Bitcoin)
-        .map_err(|_| "enter a valid mainnet BTC address before starting real mining".to_string())?;
+        .map_err(|_| "address is not a Bitcoin mainnet address".to_string())?;
 
     Ok(())
 }
@@ -705,15 +728,21 @@ fn spawn_hash_workers(
     app: &AppHandle,
 ) -> Vec<thread::JoinHandle<()>> {
     let pool = format!("{}:{}", settings.pool_host, settings.pool_port);
+    let mut workers = Vec::new();
 
-    (0..settings.cpu_threads)
-        .map(|worker_index| {
-            let shared = Arc::clone(shared);
-            let share_sender = share_sender.clone();
-            let worker_count = settings.cpu_threads;
-            let worker_app = app.clone();
-            let worker_pool = pool.clone();
+    // Total worker count (CPU + GPU) for extranonce partitioning
+    let gpu_count = if settings.gpu_enabled { 1 } else { 0 };
+    let total_workers = (settings.cpu_threads + gpu_count).max(1);
 
+    // Spawn CPU workers
+    for worker_index in 0..settings.cpu_threads {
+        let shared = Arc::clone(shared);
+        let share_sender = share_sender.clone();
+        let worker_count = total_workers;
+        let worker_app = app.clone();
+        let worker_pool = pool.clone();
+
+        workers.push(
             thread::Builder::new()
                 .name(format!("btc-lottery-hash-{worker_index}"))
                 .spawn(move || {
@@ -726,9 +755,40 @@ fn spawn_hash_workers(
                         worker_pool,
                     )
                 })
-                .expect("failed to start hash worker")
-        })
-        .collect()
+                .expect("failed to start hash worker"),
+        );
+    }
+
+    // Spawn GPU worker(s)
+    if settings.gpu_enabled {
+        let shared = Arc::clone(shared);
+        let share_sender = share_sender.clone();
+        let gpu_app = app.clone();
+        let gpu_pool = pool.clone();
+        let gpu_device_id = settings.gpu_device_id.clone();
+        let gpu_intensity = settings.gpu_intensity_percent;
+        let gpu_worker_index = settings.cpu_threads; // GPU gets the last index
+
+        workers.push(
+            thread::Builder::new()
+                .name("btc-lottery-gpu-0".into())
+                .spawn(move || {
+                    crate::gpu_miner::gpu_hash_loop(
+                        shared,
+                        share_sender,
+                        gpu_app,
+                        gpu_pool,
+                        gpu_device_id,
+                        gpu_intensity,
+                        gpu_worker_index,
+                        total_workers,
+                    )
+                })
+                .expect("failed to start GPU worker"),
+        );
+    }
+
+    workers
 }
 
 fn hash_loop(
@@ -758,16 +818,20 @@ fn hash_loop(
             };
 
             for nonce in 0..=u32::MAX {
-                if shared.stop.load(Ordering::Acquire)
-                    || shared.job_generation.load(Ordering::Acquire) != job.generation
-                {
-                    break;
+                if nonce & 0x3FF == 0 {
+                    if nonce > 0 {
+                        shared.hashes.fetch_add(1024, Ordering::Relaxed);
+                    }
+                    if shared.stop.load(Ordering::Acquire)
+                        || shared.job_generation.load(Ordering::Acquire) != job.generation
+                    {
+                        break;
+                    }
                 }
 
                 header[76..80].copy_from_slice(&nonce.to_le_bytes());
                 let hash = double_sha256(&header);
                 let difficulty = difficulty_from_hash(&hash);
-                shared.hashes.fetch_add(1, Ordering::Relaxed);
                 shared.update_best_difficulty(difficulty);
 
                 if hash_meets_network_target(&hash, &job.network_target) {
@@ -800,7 +864,7 @@ fn hash_loop(
     }
 }
 
-fn build_header(job: &JobTemplate, extranonce2: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn build_header(job: &JobTemplate, extranonce2: &str) -> Result<Vec<u8>, String> {
     let mut coinbase = decode_hex(&job.coinbase1)?;
     coinbase.extend(decode_hex(&job.extranonce1)?);
     coinbase.extend(decode_hex(extranonce2)?);
@@ -854,7 +918,7 @@ fn word_swapped_hex(value: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn extranonce2_hex(counter: u64, size: usize) -> String {
+pub(crate) fn extranonce2_hex(counter: u64, size: usize) -> String {
     let mut bytes = vec![0_u8; size];
     let source = counter.to_be_bytes();
     let copied_bytes = size.min(source.len());
@@ -862,12 +926,12 @@ fn extranonce2_hex(counter: u64, size: usize) -> String {
     hex::encode(bytes)
 }
 
-fn double_sha256(value: &[u8]) -> [u8; 32] {
+pub(crate) fn double_sha256(value: &[u8]) -> [u8; 32] {
     let first_hash = Sha256::digest(value);
     Sha256::digest(first_hash).into()
 }
 
-fn difficulty_from_hash(hash: &[u8; 32]) -> f64 {
+pub(crate) fn difficulty_from_hash(hash: &[u8; 32]) -> f64 {
     let numeric_hash = hash
         .iter()
         .rev()
@@ -914,7 +978,7 @@ fn target_from_nbits(nbits: &str) -> Result<[u8; 32], String> {
     Ok(target)
 }
 
-fn hash_meets_network_target(hash: &[u8; 32], target: &[u8; 32]) -> bool {
+pub(crate) fn hash_meets_network_target(hash: &[u8; 32], target: &[u8; 32]) -> bool {
     for (hash_byte, target_byte) in hash.iter().rev().zip(target.iter()) {
         if hash_byte < target_byte {
             return true;
@@ -933,7 +997,7 @@ fn block_hash_hex(hash: &[u8; 32]) -> String {
     hex::encode(bytes)
 }
 
-fn found_block_event(
+pub(crate) fn found_block_event(
     job: &JobTemplate,
     nonce: u32,
     extranonce2: &str,
@@ -953,7 +1017,7 @@ fn found_block_event(
     }
 }
 
-fn record_block_candidate(app: &AppHandle, event: &FoundBlockEvent) {
+pub(crate) fn record_block_candidate(app: &AppHandle, event: &FoundBlockEvent) {
     log_message(app, "BLOCK CANDIDATE FOUND!");
     let _ = app.emit(BLOCK_FOUND_EVENT, event);
 
@@ -965,7 +1029,8 @@ fn record_block_candidate(app: &AppHandle, event: &FoundBlockEvent) {
         return;
     }
 
-    let path = log_dir.join("found_block.json");
+    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let path = log_dir.join(format!("found_block_{timestamp}.json"));
     match serde_json::to_vec_pretty(event) {
         Ok(payload) => {
             if let Err(error) = std::fs::write(&path, payload) {
@@ -1131,6 +1196,9 @@ mod tests {
             worker_name: "btc-lottery-pet".into(),
             cpu_threads: available_threads + 1,
             confirmed_cpu_use: true,
+            gpu_enabled: false,
+            gpu_device_id: None,
+            gpu_intensity_percent: 10,
         };
 
         assert!(settings.validate().is_err());

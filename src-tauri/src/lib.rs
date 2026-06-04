@@ -1,3 +1,4 @@
+mod gpu_miner;
 mod miner;
 mod notifications;
 
@@ -124,12 +125,11 @@ impl AppConfig {
         self.gpu_intensity_percent = self.gpu_intensity_percent.clamp(1, 100);
 
         match self.compute_mode {
-            ComputeMode::Cpu | ComputeMode::GpuRealExperimental => {
-                self.compute_mode = ComputeMode::Cpu;
+            ComputeMode::Cpu => {
                 self.gpu_enabled = false;
                 self.gpu_device_id = None;
             }
-            ComputeMode::GpuSim | ComputeMode::GpuBenchmark => {
+            ComputeMode::GpuSim | ComputeMode::GpuBenchmark | ComputeMode::GpuRealExperimental => {
                 self.gpu_enabled = true;
             }
         }
@@ -251,43 +251,59 @@ fn get_system_info() -> SystemInfo {
 }
 
 #[tauri::command]
-fn get_gpu_devices() -> Vec<GpuDevice> {
-    vec![
-        GpuDevice {
-            id: "auto".into(),
-            name: "Auto".into(),
-            simulated: true,
-        },
-        GpuDevice {
-            id: "simulated-gpu".into(),
-            name: "Simulated GPU".into(),
-            simulated: true,
-        },
-    ]
+async fn get_gpu_devices() -> Vec<GpuDevice> {
+    tauri::async_runtime::spawn_blocking(|| {
+        gpu_miner::enumerate_gpu_devices()
+            .into_iter()
+            .map(|info| GpuDevice {
+                id: info.id,
+                name: info.name,
+                simulated: info.simulated,
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[tauri::command]
-fn run_gpu_benchmark(
+async fn run_gpu_benchmark(
     gpu_device_id: Option<String>,
     gpu_intensity_percent: u8,
 ) -> GpuBenchmarkResult {
-    let gpu_intensity_percent = gpu_intensity_percent.clamp(1, 100);
-    let device_id = gpu_device_id.unwrap_or_else(|| "auto".into());
-    let device_name = if device_id == "simulated-gpu" {
-        "Simulated GPU"
-    } else {
-        "Auto"
-    };
-
-    GpuBenchmarkResult {
-        device_id,
-        device_name: device_name.into(),
-        simulated: true,
-        gpu_intensity_percent,
-        hashrate: 120_000_000.0 * f64::from(gpu_intensity_percent) / 10.0,
-        duration_ms: 250,
-        note: "Simulated benchmark only. No real GPU workload was started.".into(),
-    }
+    let intensity = gpu_intensity_percent.clamp(1, 100);
+    tauri::async_runtime::spawn_blocking(move || {
+        match gpu_miner::run_gpu_benchmark(gpu_device_id.as_deref(), intensity) {
+            Ok(info) => GpuBenchmarkResult {
+                device_id: gpu_device_id.unwrap_or_else(|| "auto".into()),
+                device_name: info.device_name,
+                simulated: info.simulated,
+                gpu_intensity_percent: intensity,
+                hashrate: info.hashrate,
+                duration_ms: info.duration_ms,
+                note: info.note,
+            },
+            Err(error) => GpuBenchmarkResult {
+                device_id: gpu_device_id.unwrap_or_else(|| "auto".into()),
+                device_name: "Unknown".into(),
+                simulated: false,
+                gpu_intensity_percent: intensity,
+                hashrate: 0.0,
+                duration_ms: 0,
+                note: format!("GPU benchmark failed: {error}"),
+            },
+        }
+    })
+    .await
+    .unwrap_or_else(|_| GpuBenchmarkResult {
+        device_id: "auto".into(),
+        device_name: "Unknown".into(),
+        simulated: false,
+        gpu_intensity_percent: intensity,
+        hashrate: 0.0,
+        duration_ms: 0,
+        note: "GPU benchmark task panicked".into(),
+    })
 }
 
 #[tauri::command]
@@ -507,10 +523,8 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        get_gpu_devices, get_system_info, run_gpu_benchmark, AppConfig, ComputeMode,
-        PerformancePreset,
-    };
+    use super::{get_system_info, AppConfig, ComputeMode, PerformancePreset};
+    use crate::gpu_miner;
 
     #[test]
     fn normalizes_saved_config_to_safe_startup_values() {
@@ -525,9 +539,8 @@ mod tests {
         let normalized = config.normalized();
 
         assert!(!normalized.real_mining_enabled);
-        assert_eq!(normalized.compute_mode, ComputeMode::Cpu);
-        assert!(!normalized.gpu_enabled);
-        assert_eq!(normalized.gpu_device_id, None);
+        assert_eq!(normalized.compute_mode, ComputeMode::GpuRealExperimental);
+        assert!(normalized.gpu_enabled);
     }
 
     #[test]
@@ -593,15 +606,23 @@ mod tests {
     }
 
     #[test]
-    fn gpu_benchmark_is_simulated_placeholder_only() {
-        let devices = get_gpu_devices();
-        let result = run_gpu_benchmark(Some("simulated-gpu".into()), 25);
+    fn gpu_benchmark_returns_a_result() {
+        // Call the underlying sync functions directly (the Tauri commands are async wrappers)
+        let devices = gpu_miner::enumerate_gpu_devices();
 
-        assert_eq!(devices.len(), 2);
-        assert!(devices.iter().all(|device| device.simulated));
-        assert!(result.simulated);
-        assert_eq!(result.device_id, "simulated-gpu");
-        assert_eq!(result.gpu_intensity_percent, 25);
-        assert!(result.note.contains("No real GPU workload"));
+        // There should always be at least the "auto" entry
+        assert!(!devices.is_empty());
+        assert_eq!(devices[0].id, "auto");
+
+        // Benchmark should return some result (real or error)
+        let result = gpu_miner::run_gpu_benchmark(None, 25);
+        match result {
+            Ok(info) => {
+                assert!(!info.device_name.is_empty());
+            }
+            Err(_) => {
+                // GPU benchmark may fail on machines without a compatible GPU — that's OK
+            }
+        }
     }
 }

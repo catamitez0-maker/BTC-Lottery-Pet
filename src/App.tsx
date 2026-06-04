@@ -170,16 +170,19 @@ function threadsForPreset(
   preset: PerformancePreset,
   systemInfo: SystemInfo,
   customThreads: number,
+  gpuEnabled = false,
 ) {
   switch (preset) {
     case "eco":
-      return 1;
+      return gpuEnabled ? 0 : 1;
     case "normal":
-      return systemInfo.recommended_cpu_threads;
+      return gpuEnabled ? 0 : systemInfo.recommended_cpu_threads;
     case "turbo":
-      return systemInfo.available_parallelism;
+      return gpuEnabled
+        ? systemInfo.available_parallelism
+        : systemInfo.available_parallelism;
     case "custom":
-      return Math.min(Math.max(1, customThreads), systemInfo.available_parallelism);
+      return Math.min(Math.max(gpuEnabled ? 0 : 1, customThreads), systemInfo.available_parallelism);
   }
 }
 
@@ -470,21 +473,12 @@ function App() {
 
       if (lowerMessage.includes("share accepted")) {
         if (shouldSyncRealMining) {
-          setRealStats((current) => ({
-            ...current,
-            accepted_shares: current.accepted_shares + 1,
-          }));
+          // Share count is tracked by the backend via mining-stats events.
+          // We only trigger the notification here.
           void invoke("notify_share_accepted", {
             settings: notificationSettingsFromConfig(configRef.current),
           }).catch(() => {});
         }
-      }
-
-      if (shouldSyncRealMining && lowerMessage.includes("share rejected")) {
-        setRealStats((current) => ({
-          ...current,
-          rejected_shares: current.rejected_shares + 1,
-        }));
       }
 
       if (lowerMessage.includes("connection error")) {
@@ -740,40 +734,40 @@ function App() {
 
   // Track New Best Difficulty
   const activeBestDiff = realModeEnabled ? realStats.best_difficulty : simulationStats.bestDifficulty;
-  const [prevBestDiff, setPrevBestDiff] = useState(0);
+  const prevBestDiffRef = useRef(0);
 
   useEffect(() => {
     if (!isMining) {
-      setPrevBestDiff(activeBestDiff);
+      prevBestDiffRef.current = activeBestDiff;
       return;
     }
-    if (activeBestDiff > prevBestDiff) {
-      if (prevBestDiff > 0) {
+    if (activeBestDiff > prevBestDiffRef.current) {
+      if (prevBestDiffRef.current > 0) {
         setIsNewBest(true);
         const timer = setTimeout(() => setIsNewBest(false), 3000);
-        setPrevBestDiff(activeBestDiff);
+        prevBestDiffRef.current = activeBestDiff;
         return () => clearTimeout(timer);
       }
-      setPrevBestDiff(activeBestDiff);
+      prevBestDiffRef.current = activeBestDiff;
     }
   }, [activeBestDiff, isMining]);
 
   // Track Real Accepted Shares for Lucky Trigger
-  const [prevAcceptedShares, setPrevAcceptedShares] = useState(0);
+  const prevAcceptedSharesRef = useRef(0);
 
   useEffect(() => {
     if (!isMining || !realModeEnabled) {
-      setPrevAcceptedShares(realStats.accepted_shares);
+      prevAcceptedSharesRef.current = realStats.accepted_shares;
       return;
     }
-    if (realStats.accepted_shares > prevAcceptedShares) {
-      if (prevAcceptedShares > 0) {
+    if (realStats.accepted_shares > prevAcceptedSharesRef.current) {
+      if (prevAcceptedSharesRef.current > 0) {
         setIsLucky(true);
         const timer = setTimeout(() => setIsLucky(false), 3000);
-        setPrevAcceptedShares(realStats.accepted_shares);
+        prevAcceptedSharesRef.current = realStats.accepted_shares;
         return () => clearTimeout(timer);
       }
-      setPrevAcceptedShares(realStats.accepted_shares);
+      prevAcceptedSharesRef.current = realStats.accepted_shares;
     }
   }, [realStats.accepted_shares, isMining, realModeEnabled]);
 
@@ -821,7 +815,7 @@ function App() {
 
     isMiningRef.current = true;
     setIsMining(true);
-    setPrevAcceptedShares(0);
+    prevAcceptedSharesRef.current = 0;
     setRealStats((current) => ({
       ...current,
       hashrate: 0,
@@ -838,8 +832,16 @@ function App() {
           poolPort: config.pool_port,
           btcAddress: config.btc_address,
           workerName: config.worker_name,
-          cpuThreads: config.cpu_threads,
+          cpuThreads: threadsForPreset(
+            config.performance_preset,
+            systemInfo,
+            config.cpu_threads,
+            config.gpu_enabled && config.compute_mode === "gpu_real_experimental",
+          ),
           confirmedCpuUse: true,
+          gpuEnabled: config.gpu_enabled && config.compute_mode === "gpu_real_experimental",
+          gpuDeviceId: config.gpu_device_id,
+          gpuIntensityPercent: config.gpu_intensity_percent,
         },
       });
     } catch (error) {
@@ -917,8 +919,8 @@ function App() {
     if (realModeEnabled) {
       void disableRealMode();
     } else {
-      if (config.compute_mode !== "cpu") {
-        setErrorMessage("Select CPU compute mode before enabling real mining.");
+      if (config.compute_mode !== "cpu" && config.compute_mode !== "gpu_real_experimental") {
+        setErrorMessage("Select CPU or GPU Real Mining compute mode before enabling real mining.");
         setShowSettings(true);
         return;
       }
@@ -931,10 +933,12 @@ function App() {
     setErrorMessage("");
 
     const performancePreset = draftConfig.performance_preset;
+    const isGpuMode = draftConfig.compute_mode === "gpu_real_experimental";
     const cpuThreads = threadsForPreset(
       performancePreset,
       systemInfo,
       Number(draftConfig.cpu_threads),
+      isGpuMode,
     );
 
     const settings: AppConfig = {
@@ -943,13 +947,10 @@ function App() {
       cpu_threads: cpuThreads,
       performance_preset: performancePreset,
       real_mining_enabled: false,
-      compute_mode:
-        draftConfig.compute_mode === "gpu_real_experimental"
-          ? "cpu"
-          : draftConfig.compute_mode,
       gpu_enabled:
         draftConfig.compute_mode === "gpu_sim" ||
-        draftConfig.compute_mode === "gpu_benchmark",
+        draftConfig.compute_mode === "gpu_benchmark" ||
+        draftConfig.compute_mode === "gpu_real_experimental",
       gpu_device_id: draftConfig.compute_mode === "cpu" ? null : draftConfig.gpu_device_id,
     };
 
@@ -967,7 +968,6 @@ function App() {
       setDraftConfig(settings);
     }
 
-    setErrorMessage("");
     setShowSettings(false);
   };
 
@@ -1091,7 +1091,9 @@ function App() {
   const displayedHashrate = realModeEnabled
     ? formatHashrate(realStats.hashrate)
     : `${simulationStats.hashrate.toFixed(2)} MH/s`;
-  const compactComputeMode = realModeEnabled ? "CPU" : gpuSimEnabled ? "GPU SIM" : "CPU";
+  const compactComputeMode = realModeEnabled
+    ? config.compute_mode === "gpu_real_experimental" ? "GPU" : "CPU"
+    : gpuSimEnabled ? "GPU SIM" : "CPU";
   const statusClassName = petStatus === "Lucky Flash" || petStatus === "Jackpot" ? "flash" : "";
   const isMiningAnimation = petStatus === "Mining" || petStatus === "Overdrive";
   const displayStatus = petStatus === "Jackpot" ? "JACKPOT" : petStatus;
@@ -1105,8 +1107,12 @@ function App() {
     ["PRESET", performancePresetLabel(config.performance_preset)],
     ["CPU THREADS", `${config.cpu_threads}`],
     ["RECOMMENDED", `${systemInfo.recommended_cpu_threads}`],
-    ["REAL MINING", "CPU only"],
-    ["GPU", "Sim/Benchmark only"],
+    ["REAL MINING", config.gpu_enabled && config.compute_mode === "gpu_real_experimental"
+      ? (config.cpu_threads > 0 ? "CPU + GPU" : "GPU only")
+      : config.compute_mode === "cpu" ? "CPU only" : "Sim/Benchmark"],
+    ["GPU", config.compute_mode === "gpu_real_experimental"
+      ? "Real GPU"
+      : config.compute_mode === "gpu_sim" ? "Sim" : config.compute_mode === "gpu_benchmark" ? "Benchmark" : "Disabled"],
   ];
   const metrics = [
     ["HASHRATE", displayedHashrate],
@@ -1124,19 +1130,23 @@ function App() {
       : []),
   ];
 
+  const isGpuRealMode = config.compute_mode === "gpu_real_experimental";
   const cpuThreadOptions = useMemo(() => {
     const available = Math.max(1, systemInfo.available_parallelism);
-    return Array.from(new Set([1, 2, 4, available]))
+    const base = isGpuRealMode ? [0, 1, 2, 4, available] : [1, 2, 4, available];
+    return Array.from(new Set(base))
       .filter((threads) => threads <= available)
       .sort((left, right) => left - right);
-  }, [systemInfo.available_parallelism]);
+  }, [systemInfo.available_parallelism, isGpuRealMode]);
 
   return (
     <main className={`pet-shell ${displayMode} ${petStatus === "Lucky Flash" || petStatus === "Jackpot" ? "lucky" : ""}`}>
       <header className="topbar">
         <div>
           <p className="eyebrow">
-            {realModeEnabled ? "REAL CPU MINING" : gpuSimEnabled ? "GPU SIM MODE" : "SIMULATION MODE"}
+            {realModeEnabled
+              ? config.compute_mode === "gpu_real_experimental" ? "REAL GPU MINING" : "REAL CPU MINING"
+              : gpuSimEnabled ? "GPU SIM MODE" : "SIMULATION MODE"}
           </p>
           <h1>BTC Lottery Pet</h1>
         </div>
@@ -1290,7 +1300,9 @@ function App() {
 
       <footer>
         <span className={`dot ${realModeEnabled ? "armed" : ""}`} />
-        {realModeEnabled ? "Explicit CPU mode" : gpuSimEnabled ? "Local GPU simulation" : "Local-only simulation"}
+        {realModeEnabled
+          ? config.compute_mode === "gpu_real_experimental" ? "GPU + CPU real mining" : "Explicit CPU mode"
+          : gpuSimEnabled ? "Local GPU simulation" : "Local-only simulation"}
         <button
           className="settings-button"
           disabled={isMining}
@@ -1310,7 +1322,7 @@ function App() {
             <p className="eyebrow">EXPLICIT OPT-IN</p>
             <h2>Enable real mining?</h2>
             <p>
-              Real mining mode will use your CPU. This is for education and lottery-style solo
+              Real mining mode will use your {config.compute_mode === "gpu_real_experimental" ? "GPU and CPU" : "CPU"}. This is for education and lottery-style solo
               mining only.
             </p>
             <div className="panel-actions">
@@ -1406,6 +1418,7 @@ function App() {
                         performancePreset,
                         systemInfo,
                         Number(draftConfig.cpu_threads),
+                        draftConfig.compute_mode === "gpu_real_experimental",
                       ),
                     });
                   }}
@@ -1437,8 +1450,9 @@ function App() {
                 >
                   {cpuThreadOptions.map((threads) => (
                     <option key={threads} value={threads}>
-                      {threads} thread{threads === 1 ? "" : "s"}
-                      {threads === systemInfo.available_parallelism ? " (max)" : ""}
+                      {threads === 0
+                        ? "0 threads (GPU only)"
+                        : `${threads} thread${threads === 1 ? "" : "s"}${threads === systemInfo.available_parallelism ? " (max)" : ""}`}
                     </option>
                   ))}
                 </select>
@@ -1452,7 +1466,10 @@ function App() {
                     setDraftConfig({
                       ...draftConfig,
                       compute_mode: computeMode,
-                      gpu_enabled: computeMode === "gpu_sim" || computeMode === "gpu_benchmark",
+                      gpu_enabled:
+                        computeMode === "gpu_sim" ||
+                        computeMode === "gpu_benchmark" ||
+                        computeMode === "gpu_real_experimental",
                       gpu_device_id: computeMode === "cpu" ? null : draftConfig.gpu_device_id,
                     });
                   }}
@@ -1460,8 +1477,8 @@ function App() {
                   <option value="cpu">CPU</option>
                   <option value="gpu_sim">GPU Sim</option>
                   <option value="gpu_benchmark">GPU Benchmark</option>
-                  <option value="gpu_real_experimental" disabled>
-                    GPU Real Experimental (Coming Soon)
+                  <option value="gpu_real_experimental">
+                    GPU Real Mining
                   </option>
                 </select>
               </label>
@@ -1483,6 +1500,17 @@ function App() {
                     </option>
                   ))}
                 </select>
+                {draftConfig.compute_mode !== "cpu" && gpuDevices.length <= 1 && (
+                  <p className="field-hint warning">
+                    ⚠ No compatible GPU detected. Your GPU may not support DX12/Vulkan/OpenCL.
+                    Try updating your GPU drivers.
+                  </p>
+                )}
+                {draftConfig.compute_mode !== "cpu" && gpuDevices.some((d) => d.simulated && d.id !== "auto") && (
+                  <p className="field-hint warning">
+                    ⚠ Only software GPU (WARP) found — slower than CPU mining.
+                  </p>
+                )}
               </label>
               <label>
                 GPU INTENSITY
@@ -1510,7 +1538,9 @@ function App() {
                     ? "SIM ENABLED"
                     : draftConfig.compute_mode === "gpu_benchmark"
                       ? "BENCHMARK ENABLED"
-                      : "DISABLED"}
+                      : draftConfig.compute_mode === "gpu_real_experimental"
+                        ? "REAL GPU ENABLED"
+                        : "DISABLED"}
                 </strong>
               </div>
               <label>

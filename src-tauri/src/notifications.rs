@@ -423,7 +423,11 @@ fn parse_http_url(url: &str) -> Result<HttpTarget, String> {
 }
 
 fn ps_single_quote(value: &str) -> String {
-    value.replace('\'', "''").replace(['\r', '\n'], " ")
+    value
+        .replace('\'', "''")
+        .replace(['\r', '\n'], " ")
+        .replace('`', "``")
+        .replace('$', "`$")
 }
 
 #[cfg(test)]
