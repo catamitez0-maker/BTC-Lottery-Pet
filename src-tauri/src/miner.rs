@@ -428,6 +428,13 @@ fn run_stratum_connection(
             };
 
             request_id += 1;
+
+            // Prune stale entries to prevent unbounded growth from unresponsive pools
+            if pending_submissions.len() > 64 {
+                let threshold = request_id.saturating_sub(64);
+                pending_submissions.retain(|&id| id > threshold);
+            }
+
             log_message(
                 app,
                 &format!(
@@ -825,6 +832,11 @@ pub(crate) fn hash_loop(
                     if shared.stop.load(Ordering::Acquire)
                         || shared.job_generation.load(Ordering::Acquire) != job.generation
                     {
+                        // Count the hashes done in this partial 1024-block
+                        let partial = nonce & 0x3FF;
+                        if partial > 0 {
+                            shared.hashes.fetch_add(partial as u64, Ordering::Relaxed);
+                        }
                         break;
                     }
                 }

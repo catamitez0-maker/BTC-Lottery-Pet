@@ -1145,11 +1145,12 @@ function App() {
   const isGpuRealMode = config.compute_mode === "gpu_real_experimental";
   const cpuThreadOptions = useMemo(() => {
     const available = Math.max(1, systemInfo.available_parallelism);
-    const base = isGpuRealMode ? [0, 1, 2, 4, available] : [1, 2, 4, available];
+    const rec = systemInfo.recommended_cpu_threads;
+    const base = isGpuRealMode ? [0, 1, 2, rec, 4, available] : [1, 2, rec, 4, available];
     return Array.from(new Set(base))
       .filter((threads) => threads <= available)
       .sort((left, right) => left - right);
-  }, [systemInfo.available_parallelism, isGpuRealMode]);
+  }, [systemInfo.available_parallelism, systemInfo.recommended_cpu_threads, isGpuRealMode]);
 
   return (
     <main className={`pet-shell ${displayMode} ${petStatus === "Lucky Flash" || petStatus === "Jackpot" ? "lucky" : ""}`}>

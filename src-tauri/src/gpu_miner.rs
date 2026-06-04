@@ -467,7 +467,7 @@ impl GpuMiner {
         params_data[8..11].copy_from_slice(tail);
         params_data[11] = nonce_start;
         params_data[12..20].copy_from_slice(target);
-        self.queue.write_buffer(&self.params_buffer, 0, bytemuck_cast_slice(&params_data));
+        self.queue.write_buffer(&self.params_buffer, 0, &u32_slice_to_bytes(&params_data));
 
         // Zero the results buffer via a clear command
         let results_size = 257 * 4;
@@ -529,9 +529,9 @@ impl GpuMiner {
     }
 }
 
-/// Safe cast from &[u32] to &[u8] without depending on the bytemuck crate.
-fn bytemuck_cast_slice(data: &[u32]) -> &[u8] {
-    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) }
+/// Safe conversion from &[u32] to a byte vector (native-endian).
+fn u32_slice_to_bytes(data: &[u32]) -> Vec<u8> {
+    data.iter().flat_map(|v| v.to_ne_bytes()).collect()
 }
 
 /// Safe conversion from &[u8] to Vec<u32> without UB.
@@ -910,7 +910,11 @@ pub(crate) fn gpu_hash_loop(
             continue;
         };
 
+        // Target only depends on share_difficulty which is constant for a job.
+        let target = difficulty_to_target_words(job.share_difficulty);
+
         let mut extranonce_counter = worker_index as u64 + 1;
+        let mut extranonce_cycles = 0u64;
 
         while !shared.stop.load(Ordering::Acquire)
             && shared.job_generation.load(Ordering::Acquire) == job.generation
@@ -922,7 +926,9 @@ pub(crate) fn gpu_hash_loop(
                 break;
             };
 
-            // Compute midstate from the first 64 bytes of the header
+            // Compute midstate from the first 64 bytes of the header.
+            // This changes per-extranonce because extranonce2 is part of the coinbase
+            // which feeds into the merkle root in the first 64 header bytes.
             let first_block: [u8; 64] = header[0..64].try_into().unwrap();
             let midstate = sha256_midstate(&first_block);
 
@@ -932,8 +938,6 @@ pub(crate) fn gpu_hash_loop(
                 u32::from_le_bytes(header[68..72].try_into().unwrap()),
                 u32::from_le_bytes(header[72..76].try_into().unwrap()),
             ];
-
-            let target = difficulty_to_target_words(job.share_difficulty);
 
             // Inner nonce loop: dispatch batches across the full nonce space
             let mut nonce_start = 0u32;
@@ -1051,12 +1055,24 @@ pub(crate) fn gpu_hash_loop(
                 };
                 nonce_start = next_nonce;
 
-                // Sleep a tiny bit to prevent Windows TDR, reduce GPU temperatures,
-                // and keep desktop rendering completely smooth.
-                std::thread::sleep(Duration::from_millis(3));
+                // Yield briefly to prevent Windows TDR and keep the desktop responsive.
+                // 1ms is enough to let the GPU driver service display requests.
+                std::thread::sleep(Duration::from_millis(1));
             }
 
             extranonce_counter = extranonce_counter.wrapping_add(total_workers as u64);
+            extranonce_cycles += 1;
+
+            // Log diagnostic info periodically (every 10 extranonce cycles)
+            if extranonce_cycles % 10 == 0 {
+                log_message(
+                    &app,
+                    &format!(
+                        "GPU extranonce cycle #{} (counter={})",
+                        extranonce_cycles, extranonce_counter
+                    ),
+                );
+            }
         }
     }
 }
