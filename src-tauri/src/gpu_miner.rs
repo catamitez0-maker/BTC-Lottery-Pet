@@ -504,7 +504,7 @@ impl GpuMiner {
 
         let result = if receiver.recv().map(|r| r.is_ok()).unwrap_or(false) {
             let data = buffer_slice.get_mapped_range();
-            let results: &[u32] = bytemuck_cast_slice_from_bytes(&data);
+            let results = bytes_to_u32_vec(&data);
             let count = (results[0] as usize).min(256);
             let nonces = results[1..1 + count].to_vec();
             drop(data); // Drop map range so we can unmap
@@ -534,11 +534,13 @@ fn bytemuck_cast_slice(data: &[u32]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) }
 }
 
-/// Safe cast from &[u8] to &[u32] without depending on the bytemuck crate.
-/// The input slice length must be a multiple of 4.
-fn bytemuck_cast_slice_from_bytes(data: &[u8]) -> &[u32] {
-    assert!(data.len() % 4 == 0, "byte slice not aligned to u32");
-    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u32, data.len() / 4) }
+/// Safe conversion from &[u8] to Vec<u32> without UB.
+/// Uses native-endian byte reading — no alignment requirement.
+fn bytes_to_u32_vec(data: &[u8]) -> Vec<u32> {
+    assert!(data.len() % 4 == 0, "byte slice length not a multiple of 4");
+    data.chunks_exact(4)
+        .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -961,17 +963,21 @@ pub(crate) fn gpu_hash_loop(
                                     &app,
                                     &format!("GPU re-initialization failed: {reinit_err}. Falling back to CPU mining."),
                                 );
-                                // Spawn a fallback CPU worker thread since GPU failed permanently
+                                // Spawn a fallback CPU worker thread using the GPU's
+                                // original slot to avoid extranonce collisions with
+                                // any existing CPU workers.
                                 let shared_clone = Arc::clone(&shared);
                                 let sender_clone = share_sender.clone();
                                 let app_clone = app.clone();
                                 let pool_clone = pool.clone();
+                                let fallback_index = worker_index;
+                                let fallback_total = total_workers;
                                 std::thread::Builder::new()
                                     .name("btc-lottery-cpu-fallback".into())
                                     .spawn(move || {
                                         miner::hash_loop(
-                                            0,
-                                            1,
+                                            fallback_index,
+                                            fallback_total,
                                             shared_clone,
                                             sender_clone,
                                             app_clone,
@@ -1085,9 +1091,21 @@ pub(crate) fn run_gpu_benchmark(
     let mut nonce_start = 0u32;
 
     while start.elapsed() < benchmark_duration {
-        if let Err(e) = gpu.mine_batch(&midstate, &tail, nonce_start, &target) {
-            return Err(format!("GPU benchmark error: {e}"));
+        // Use catch_unwind to survive driver crashes from old/buggy GPU drivers
+        let batch_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            gpu.mine_batch(&midstate, &tail, nonce_start, &target)
+        }));
+
+        match batch_result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                return Err(format!("GPU benchmark error: {e}"));
+            }
+            Err(_) => {
+                return Err("GPU driver crashed during benchmark (possible driver incompatibility)".into());
+            }
         }
+
         total_hashes += gpu.batch_size() as u64;
         match nonce_start.checked_add(gpu.batch_size()) {
             Some(next) => nonce_start = next,

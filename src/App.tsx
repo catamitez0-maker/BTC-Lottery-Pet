@@ -410,9 +410,9 @@ function App() {
       .catch(() => setGpuDevices(fallbackGpuDevices));
   }, []);
 
-  // Listen to Mining Stats
   useEffect(() => {
-    let unlisten = () => {};
+    let unlisten: (() => void) | null = null;
+    let unmounted = false;
 
     listen<RealMiningStats>("mining-stats", (event) => {
       setRealStats((current) => {
@@ -432,7 +432,7 @@ function App() {
       });
     })
       .then((cleanup) => {
-        unlisten = cleanup;
+        if (unmounted) { cleanup(); } else { unlisten = cleanup; }
       })
       .catch((error) => {
         if (runningInTauri) {
@@ -440,12 +440,13 @@ function App() {
         }
       });
 
-    return () => unlisten();
+    return () => { unmounted = true; unlisten?.(); };
   }, []);
 
   // Listen to Mining Logs
   useEffect(() => {
-    let unlisten = () => {};
+    let unlisten: (() => void) | null = null;
+    let unmounted = false;
 
     listen<string>("mining-log", (event) => {
       const message = event.payload;
@@ -496,7 +497,7 @@ function App() {
       }
     })
       .then((cleanup) => {
-        unlisten = cleanup;
+        if (unmounted) { cleanup(); } else { unlisten = cleanup; }
       })
       .catch((error) => {
         if (runningInTauri) {
@@ -504,12 +505,13 @@ function App() {
         }
       });
 
-    return () => unlisten();
+    return () => { unmounted = true; unlisten?.(); };
   }, []);
 
   // Listen to Block Candidate Events
   useEffect(() => {
-    let unlisten = () => {};
+    let unlisten: (() => void) | null = null;
+    let unmounted = false;
 
     listen<BlockFoundEvent>("block-found", (event) => {
       setBlockFound(event.payload);
@@ -529,7 +531,7 @@ function App() {
       }).catch(() => {});
     })
       .then((cleanup) => {
-        unlisten = cleanup;
+        if (unmounted) { cleanup(); } else { unlisten = cleanup; }
       })
       .catch((error) => {
         if (runningInTauri) {
@@ -537,7 +539,7 @@ function App() {
         }
       });
 
-    return () => unlisten();
+    return () => { unmounted = true; unlisten?.(); };
   }, []);
 
   // Fetch Block Height
@@ -868,6 +870,8 @@ function App() {
     }
     setIsLucky(false);
     setIsNewBest(false);
+    setBlockFound(null);
+    setShowJackpot(false);
 
     if (coolingDownTimerRef.current) {
       clearTimeout(coolingDownTimerRef.current);
@@ -1080,6 +1084,8 @@ function App() {
     petStatus = "New Best Diff";
   } else if (gpuSimEnabled && !realModeEnabled) {
     petStatus = "Overdrive";
+  } else if (realModeEnabled && config.compute_mode === "gpu_real_experimental") {
+    petStatus = "Overdrive";
   } else {
     petStatus = "Mining";
   }
@@ -1103,12 +1109,18 @@ function App() {
       ? "Authorized"
       : realStats.connection_status;
   const jobStatus = realStats.current_job_id || "Waiting";
+  const effectiveCpuThreads = threadsForPreset(
+    config.performance_preset,
+    systemInfo,
+    config.cpu_threads,
+    config.gpu_enabled && config.compute_mode === "gpu_real_experimental",
+  );
   const resourceMetrics = [
     ["PRESET", performancePresetLabel(config.performance_preset)],
-    ["CPU THREADS", `${config.cpu_threads}`],
+    ["CPU THREADS", `${effectiveCpuThreads}`],
     ["RECOMMENDED", `${systemInfo.recommended_cpu_threads}`],
     ["REAL MINING", config.gpu_enabled && config.compute_mode === "gpu_real_experimental"
-      ? (config.cpu_threads > 0 ? "CPU + GPU" : "GPU only")
+      ? (effectiveCpuThreads > 0 ? "CPU + GPU" : "GPU only")
       : config.compute_mode === "cpu" ? "CPU only" : "Sim/Benchmark"],
     ["GPU", config.compute_mode === "gpu_real_experimental"
       ? "Real GPU"
@@ -1301,7 +1313,9 @@ function App() {
       <footer>
         <span className={`dot ${realModeEnabled ? "armed" : ""}`} />
         {realModeEnabled
-          ? config.compute_mode === "gpu_real_experimental" ? "GPU + CPU real mining" : "Explicit CPU mode"
+          ? config.compute_mode === "gpu_real_experimental"
+            ? (effectiveCpuThreads > 0 ? "GPU + CPU real mining" : "GPU real mining")
+            : "Explicit CPU mode"
           : gpuSimEnabled ? "Local GPU simulation" : "Local-only simulation"}
         <button
           className="settings-button"
@@ -1423,14 +1437,18 @@ function App() {
                     });
                   }}
                 >
-                  <option value="eco">Eco - 1 thread</option>
+                  <option value="eco">
+                    Eco - {draftConfig.compute_mode === "gpu_real_experimental" ? "GPU only" : "1 thread"}
+                  </option>
                   <option value="normal">
-                    Normal - {systemInfo.recommended_cpu_threads} thread
-                    {systemInfo.recommended_cpu_threads === 1 ? "" : "s"}
+                    Normal - {draftConfig.compute_mode === "gpu_real_experimental"
+                      ? "GPU only"
+                      : `${systemInfo.recommended_cpu_threads} thread${systemInfo.recommended_cpu_threads === 1 ? "" : "s"}`}
                   </option>
                   <option value="turbo">
                     Turbo - {systemInfo.available_parallelism} thread
                     {systemInfo.available_parallelism === 1 ? "" : "s"}
+                    {draftConfig.compute_mode === "gpu_real_experimental" ? " + GPU" : ""}
                   </option>
                   <option value="custom">Custom</option>
                 </select>

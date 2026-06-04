@@ -338,6 +338,23 @@ h1 {
   box-shadow: 0 0 4px #39e575;
 }
 
+/* CONNECTING: Slow pulsing cyan glow to indicate connecting to pool */
+.connecting .pet-machine {
+  border-color: #4fc3f7;
+  box-shadow: 0 0 6px rgba(79, 195, 247, 0.3);
+  animation: connecting-pulse 1.5s ease-in-out infinite;
+}
+
+.connecting .light {
+  background: #4fc3f7;
+  animation: flash-led 1s step-end infinite;
+}
+
+@keyframes connecting-pulse {
+  0%, 100% { box-shadow: 0 0 4px rgba(79, 195, 247, 0.2); }
+  50% { box-shadow: 0 0 12px rgba(79, 195, 247, 0.6); }
+}
+
 /* CONNECTION ERROR: Glitching shaking, red flashing lights, smoke puffs */
 .connection-error .pet-machine {
   animation: glitch-shake 0.15s linear infinite;
