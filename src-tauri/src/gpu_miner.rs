@@ -389,10 +389,11 @@ impl GpuMiner {
             cache: None,
         });
 
-        // Scale batch size from 1M (intensity 1%) to 16M (intensity 100%).
-        // Round to a multiple of 256 (workgroup size).
+        // Scale batch size from 1M (intensity 1%) to 4M (intensity 100%).
+        // Round to a multiple of 256 (workgroup size). Capping at 4M prevents
+        // Windows TDR (Timeout Detection and Recovery) on slower graphics cards.
         let intensity = intensity_percent.clamp(1, 100) as u32;
-        let raw = (1_000_000 + (intensity - 1) * 151_515).min(16_000_000);
+        let raw = (1_000_000 + (intensity - 1) * 30_303).min(4_000_000);
         let batch_size = (raw + 255) & !255; // round up to multiple of 256
 
         // Pre-allocate GPU buffers (reused across all mine_batch calls)
@@ -459,7 +460,7 @@ impl GpuMiner {
         tail: &[u32; 3],
         nonce_start: u32,
         target: &[u32; 8],
-    ) -> Vec<u32> {
+    ) -> Result<Vec<u32>, String> {
         // Write params into the pre-allocated buffer
         let mut params_data = [0u32; 20];
         params_data[0..8].copy_from_slice(midstate);
@@ -505,9 +506,11 @@ impl GpuMiner {
             let data = buffer_slice.get_mapped_range();
             let results: &[u32] = bytemuck_cast_slice_from_bytes(&data);
             let count = (results[0] as usize).min(256);
-            results[1..1 + count].to_vec()
+            let nonces = results[1..1 + count].to_vec();
+            drop(data); // Drop map range so we can unmap
+            Ok(nonces)
         } else {
-            Vec::new()
+            Err("GPU mapping failed (device lost or out of memory)".to_string())
         };
 
         // Unmap the staging buffer so it can be reused next call
@@ -617,10 +620,11 @@ impl OpenClMiner {
         let kernel = Kernel::create(&program, "sha256_mine")
             .map_err(|e| format!("OpenCL kernel creation failed: {e}"))?;
 
-        // Scale batch size from 1M (intensity 1%) to 16M (intensity 100%).
-        // Round to a multiple of 256 (workgroup size).
+        // Scale batch size from 1M (intensity 1%) to 4M (intensity 100%).
+        // Round to a multiple of 256 (workgroup size). Capping at 4M prevents
+        // Windows TDR (Timeout Detection and Recovery) on slower graphics cards.
         let intensity = intensity_percent.clamp(1, 100) as usize;
-        let raw = (1_000_000 + (intensity - 1) * 151_515).min(16_000_000);
+        let raw = (1_000_000 + (intensity - 1) * 30_303).min(4_000_000);
         let batch_size = (raw + 255) & !255;
 
         // Pre-allocate OpenCL buffers (reused across all mine_batch calls)
@@ -670,7 +674,7 @@ impl OpenClMiner {
         tail: &[u32; 3],
         nonce_start: u32,
         target: &[u32; 8],
-    ) -> Vec<u32> {
+    ) -> Result<Vec<u32>, String> {
         // Build params data: 8 midstate + 3 tail + 1 nonce_start + 8 target = 20 u32s
         let mut params_data: [cl_uint; 20] = [0; 20];
         params_data[0..8].copy_from_slice(midstate);
@@ -689,8 +693,7 @@ impl OpenClMiner {
             )
         };
         if let Err(e) = write_result {
-            eprintln!("[OpenCL] Write params buffer failed: {e}");
-            return Vec::new();
+            return Err(format!("OpenCL write params failed: {e}"));
         }
 
         // Zero the results buffer
@@ -705,8 +708,7 @@ impl OpenClMiner {
             )
         };
         if let Err(e) = zero_result {
-            eprintln!("[OpenCL] Zero results buffer failed: {e}");
-            return Vec::new();
+            return Err(format!("OpenCL zero results failed: {e}"));
         }
 
         // Execute kernel
@@ -719,8 +721,7 @@ impl OpenClMiner {
                 .enqueue_nd_range(&self.queue)
         };
         if let Err(e) = kernel_event {
-            eprintln!("[OpenCL] Kernel enqueue failed: {e}");
-            return Vec::new();
+            return Err(format!("OpenCL kernel execute failed: {e}"));
         }
 
         // Read results back
@@ -735,12 +736,11 @@ impl OpenClMiner {
             )
         };
         if let Err(e) = read_result {
-            eprintln!("[OpenCL] Read buffer failed: {e}");
-            return Vec::new();
+            return Err(format!("OpenCL read buffer failed: {e}"));
         }
 
         let count = (results_data[0] as usize).min(256);
-        results_data[1..1 + count].to_vec()
+        Ok(results_data[1..1 + count].to_vec())
     }
 
     /// Returns the batch size (number of nonces per dispatch).
@@ -772,7 +772,7 @@ impl GpuBackend {
         tail: &[u32; 3],
         nonce_start: u32,
         target: &[u32; 8],
-    ) -> Vec<u32> {
+    ) -> Result<Vec<u32>, String> {
         match self {
             GpuBackend::Wgpu(gpu) => gpu.mine_batch(midstate, tail, nonce_start, target),
             GpuBackend::OpenCl(cl) => cl.mine_batch(midstate, tail, nonce_start, target),
@@ -942,7 +942,48 @@ pub(crate) fn gpu_hash_loop(
                     break;
                 }
 
-                let found_nonces = gpu.mine_batch(&midstate, &tail, nonce_start, &target);
+                let found_nonces = match gpu.mine_batch(&midstate, &tail, nonce_start, &target) {
+                    Ok(nonces) => nonces,
+                    Err(err) => {
+                        log_message(
+                            &app,
+                            &format!("GPU mining error: {err}. Attempting to re-initialize GPU in 3 seconds..."),
+                        );
+                        std::thread::sleep(Duration::from_secs(3));
+                        match create_gpu_backend(gpu_device_id.as_deref(), gpu_intensity_percent) {
+                            Ok(new_gpu) => {
+                                gpu = new_gpu;
+                                log_message(&app, "GPU re-initialized successfully. Resuming mining.");
+                                continue; // retry this batch
+                            }
+                            Err(reinit_err) => {
+                                log_message(
+                                    &app,
+                                    &format!("GPU re-initialization failed: {reinit_err}. Falling back to CPU mining."),
+                                );
+                                // Spawn a fallback CPU worker thread since GPU failed permanently
+                                let shared_clone = Arc::clone(&shared);
+                                let sender_clone = share_sender.clone();
+                                let app_clone = app.clone();
+                                let pool_clone = pool.clone();
+                                std::thread::Builder::new()
+                                    .name("btc-lottery-cpu-fallback".into())
+                                    .spawn(move || {
+                                        miner::hash_loop(
+                                            0,
+                                            1,
+                                            shared_clone,
+                                            sender_clone,
+                                            app_clone,
+                                            pool_clone,
+                                        )
+                                    })
+                                    .ok();
+                                return; // Exit GPU thread
+                            }
+                        }
+                    }
+                };
 
                 // Track hash count
                 shared
@@ -998,10 +1039,15 @@ pub(crate) fn gpu_hash_loop(
                 }
 
                 // Advance nonce_start; wrap on overflow means we've exhausted the space
-                match nonce_start.checked_add(gpu.batch_size()) {
-                    Some(next) => nonce_start = next,
+                let next_nonce = match nonce_start.checked_add(gpu.batch_size()) {
+                    Some(next) => next,
                     None => break, // exhausted nonce space
-                }
+                };
+                nonce_start = next_nonce;
+
+                // Sleep a tiny bit to prevent Windows TDR, reduce GPU temperatures,
+                // and keep desktop rendering completely smooth.
+                std::thread::sleep(Duration::from_millis(3));
             }
 
             extranonce_counter = extranonce_counter.wrapping_add(total_workers as u64);
@@ -1039,7 +1085,9 @@ pub(crate) fn run_gpu_benchmark(
     let mut nonce_start = 0u32;
 
     while start.elapsed() < benchmark_duration {
-        gpu.mine_batch(&midstate, &tail, nonce_start, &target);
+        if let Err(e) = gpu.mine_batch(&midstate, &tail, nonce_start, &target) {
+            return Err(format!("GPU benchmark error: {e}"));
+        }
         total_hashes += gpu.batch_size() as u64;
         match nonce_start.checked_add(gpu.batch_size()) {
             Some(next) => nonce_start = next,

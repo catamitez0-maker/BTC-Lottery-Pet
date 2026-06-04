@@ -791,7 +791,7 @@ fn spawn_hash_workers(
     workers
 }
 
-fn hash_loop(
+pub(crate) fn hash_loop(
     worker_index: usize,
     worker_count: usize,
     shared: Arc<SharedMiningState>,
