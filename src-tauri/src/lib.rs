@@ -213,9 +213,22 @@ fn write_config(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
 fn load_config(app: &AppHandle) -> Result<AppConfig, String> {
     let path = ensure_config(app)?;
     let contents =
-        fs::read_to_string(path).map_err(|error| format!("failed to read config: {error}"))?;
-    let config: AppConfig = serde_json::from_str(&contents)
-        .map_err(|error| format!("failed to parse config: {error}"))?;
+        fs::read_to_string(&path).map_err(|error| format!("failed to read config: {error}"))?;
+
+    // If the saved config contains values that the current version can't parse
+    // (e.g., old ComputeMode variants from a previous version), fall back to
+    // the default config rather than crashing on startup.
+    let config: AppConfig = match serde_json::from_str(&contents) {
+        Ok(c) => c,
+        Err(error) => {
+            eprintln!("[Config] Failed to parse saved config: {error}. Using defaults.");
+            let default: AppConfig = serde_json::from_str(DEFAULT_CONFIG)
+                .expect("DEFAULT_CONFIG must always be valid");
+            // Overwrite the broken config file with clean defaults
+            let _ = write_config(app, &default);
+            default
+        }
+    };
 
     Ok(config.normalized())
 }
