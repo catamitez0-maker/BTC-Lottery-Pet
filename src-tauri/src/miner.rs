@@ -236,6 +236,7 @@ pub(crate) struct SharedMiningState {
     pub(crate) rejected_shares: AtomicU64,
     pub(crate) best_difficulty_bits: AtomicU64,
     pub(crate) connection_status: Mutex<String>,
+    pub(crate) gpu_thread_alive: AtomicBool,
 }
 
 impl SharedMiningState {
@@ -249,6 +250,7 @@ impl SharedMiningState {
             rejected_shares: AtomicU64::new(0),
             best_difficulty_bits: AtomicU64::new(0.0_f64.to_bits()),
             connection_status: Mutex::new("Starting".into()),
+            gpu_thread_alive: AtomicBool::new(false),
         }
     }
 
@@ -320,7 +322,14 @@ struct ProtocolState {
 fn run_miner(app: AppHandle, settings: RealMiningSettings, stop: Arc<AtomicBool>) {
     let shared = Arc::new(SharedMiningState::new(Arc::clone(&stop)));
     let (share_sender, share_receiver) = mpsc::sync_channel(SHARE_QUEUE_CAPACITY);
-    let workers = spawn_hash_workers(&settings, &shared, &share_sender, &app);
+    let mut workers = spawn_hash_workers(&settings, &shared, &share_sender, &app);
+
+    // GPU watchdog: detect when the GPU thread dies silently (e.g., driver segfault)
+    // and spawn a CPU fallback so hashrate doesn't stay at 0 forever.
+    let gpu_watchdog_active = settings.gpu_enabled;
+    let mut gpu_fallback_spawned = false;
+    let gpu_started_at = Instant::now();
+    let pool_for_fallback = format!("{}:{}", settings.pool_host, settings.pool_port);
 
     while !stop.load(Ordering::Acquire) {
         shared.set_connection_status("Connecting");
@@ -337,6 +346,30 @@ fn run_miner(app: AppHandle, settings: RealMiningSettings, stop: Arc<AtomicBool>
                 &format!("Connection error: {}. Retrying in 2s...", error),
             );
             sleep_until_stopped(&stop, Duration::from_secs(2));
+        }
+
+        // Check if the GPU thread has died (driver crash, init failure already handled)
+        if gpu_watchdog_active && !gpu_fallback_spawned
+            && gpu_started_at.elapsed() >= Duration::from_secs(10)
+            && !shared.gpu_thread_alive.load(Ordering::Acquire)
+        {
+            log_message(
+                &app,
+                "GPU worker thread has terminated unexpectedly. Starting CPU fallback.",
+            );
+            let shared_clone = Arc::clone(&shared);
+            let sender_clone = share_sender.clone();
+            let app_clone = app.clone();
+            let pool_clone = pool_for_fallback.clone();
+            workers.push(
+                thread::Builder::new()
+                    .name("btc-lottery-cpu-fallback".into())
+                    .spawn(move || {
+                        hash_loop(0, 1, shared_clone, sender_clone, app_clone, pool_clone)
+                    })
+                    .expect("failed to start CPU fallback"),
+            );
+            gpu_fallback_spawned = true;
         }
     }
 

@@ -451,6 +451,21 @@ fn tray_icon() -> Image<'static> {
     Image::new_owned(rgba, SIZE, SIZE)
 }
 
+/// GPU compatibility probe — runs a single small mining batch.
+/// Called from main.rs when `--gpu-probe` flag is present.
+/// This runs in a child process to safely detect driver crashes.
+pub fn gpu_probe(device_id: Option<&str>, intensity_percent: u8) -> Result<String, String> {
+    let mut gpu = gpu_miner::create_gpu_backend(device_id, intensity_percent)?;
+
+    // Run one small batch with dummy data
+    let midstate = gpu_miner::sha256_midstate(&[0u8; 64]);
+    let tail = [0u32; 3];
+    let target = [0u32; 8]; // impossible target — don't care about matches
+    gpu.mine_batch(&midstate, &tail, 0, &target)?;
+
+    Ok(gpu.device_name().to_owned())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()

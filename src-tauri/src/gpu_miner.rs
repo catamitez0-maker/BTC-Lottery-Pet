@@ -867,6 +867,73 @@ pub(crate) fn create_gpu_backend(
     }
 }
 
+/// Probes GPU compatibility by running a small batch in a **child process**.
+///
+/// If the GPU driver crashes (e.g. STATUS_ACCESS_VIOLATION on AMD Caicos),
+/// only the child process dies — the main app stays alive.
+///
+/// Returns `Ok(device_name)` if the GPU is safe, or `Err(reason)` if not.
+fn probe_gpu_compatibility(
+    device_id: Option<&str>,
+    intensity_percent: u8,
+    app: &AppHandle,
+) -> Result<String, String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("cannot find own executable: {e}"))?;
+
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("--gpu-probe");
+    if let Some(id) = device_id {
+        cmd.arg(id);
+    } else {
+        cmd.arg("auto");
+    }
+    cmd.arg(intensity_percent.to_string());
+
+    // Suppress the child window on Windows (it's a windows_subsystem="windows" exe)
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    log_message(app, "Running GPU compatibility probe in child process...");
+
+    match cmd.output() {
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if output.status.success() {
+                // Extract device name from probe output
+                let device_name = stderr
+                    .lines()
+                    .find(|l| l.contains("[GPU Probe] OK:"))
+                    .map(|l| l.trim_start_matches("[GPU Probe] OK: ").trim().to_string())
+                    .unwrap_or_else(|| "Unknown GPU".into());
+                log_message(app, &format!("GPU probe passed: {device_name}"));
+                Ok(device_name)
+            } else {
+                let code = output.status.code().unwrap_or(-1);
+                let reason = if code == 1 {
+                    format!("GPU probe failed: {}", stderr.trim())
+                } else {
+                    // Abnormal exit (crash, segfault, etc.)
+                    format!(
+                        "GPU driver crashed during probe (exit code: 0x{:08X}). This GPU is not compatible.",
+                        code as u32
+                    )
+                };
+                log_message(app, &reason);
+                Err(reason)
+            }
+        }
+        Err(e) => {
+            let reason = format!("Failed to launch GPU probe process: {e}");
+            log_message(app, &reason);
+            Err(reason)
+        }
+    }
+}
+
 /// Main GPU hashing loop. Runs in a dedicated thread.
 ///
 /// This is the GPU equivalent of `hash_loop` in miner.rs. It continuously pulls
@@ -882,6 +949,40 @@ pub(crate) fn gpu_hash_loop(
     worker_index: usize,
     total_workers: usize,
 ) {
+    // Step 1: Probe GPU compatibility in a child process.
+    // If the GPU driver would crash (segfault), only the child dies.
+    if let Err(reason) = probe_gpu_compatibility(
+        gpu_device_id.as_deref(),
+        gpu_intensity_percent,
+        &app,
+    ) {
+        log_message(
+            &app,
+            &format!("GPU incompatible: {reason}. Starting CPU fallback worker."),
+        );
+        let shared_clone = Arc::clone(&shared);
+        let sender_clone = share_sender.clone();
+        let app_clone = app.clone();
+        let pool_clone = pool.clone();
+        let fallback_index = worker_index;
+        let fallback_total = total_workers;
+        std::thread::Builder::new()
+            .name("btc-lottery-cpu-fallback".into())
+            .spawn(move || {
+                miner::hash_loop(
+                    fallback_index,
+                    fallback_total,
+                    shared_clone,
+                    sender_clone,
+                    app_clone,
+                    pool_clone,
+                )
+            })
+            .ok();
+        return;
+    }
+
+    // Step 2: Probe passed — create the real GPU backend in this process.
     let mut gpu = match create_gpu_backend(gpu_device_id.as_deref(), gpu_intensity_percent) {
         Ok(gpu) => {
             log_message(
@@ -898,11 +999,41 @@ pub(crate) fn gpu_hash_loop(
         Err(error) => {
             log_message(
                 &app,
-                &format!("GPU init failed, falling back to CPU-only: {error}"),
+                &format!("GPU init failed: {error}. Starting CPU fallback worker."),
             );
+            // GPU init failed — spawn a CPU fallback so hashrate isn't zero
+            let shared_clone = Arc::clone(&shared);
+            let sender_clone = share_sender.clone();
+            let app_clone = app.clone();
+            let pool_clone = pool.clone();
+            let fallback_index = worker_index;
+            let fallback_total = total_workers;
+            std::thread::Builder::new()
+                .name("btc-lottery-cpu-fallback".into())
+                .spawn(move || {
+                    miner::hash_loop(
+                        fallback_index,
+                        fallback_total,
+                        shared_clone,
+                        sender_clone,
+                        app_clone,
+                        pool_clone,
+                    )
+                })
+                .ok();
             return;
         }
     };
+
+    // Mark GPU thread as alive; ensure it's cleared on exit (any exit path)
+    shared.gpu_thread_alive.store(true, Ordering::Release);
+    struct GpuAliveGuard<'a>(&'a std::sync::atomic::AtomicBool);
+    impl<'a> Drop for GpuAliveGuard<'a> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    let _alive_guard = GpuAliveGuard(&shared.gpu_thread_alive);
 
     while !shared.stop.load(Ordering::Acquire) {
         let Some(job) = shared.job.read().unwrap().clone() else {
