@@ -494,23 +494,47 @@ impl GpuMiner {
         encoder.copy_buffer_to_buffer(&self.results_buffer, 0, &self.staging_buffer, 0, results_size as u64);
         self.queue.submit(std::iter::once(encoder.finish()));
 
-        // Wait for GPU to finish and read back results
+        // Wait for GPU to finish with timeout (prevents infinite hang on driver stall)
         let buffer_slice = self.staging_buffer.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
         });
-        self.device.poll(wgpu::Maintain::Wait);
 
-        let result = if receiver.recv().map(|r| r.is_ok()).unwrap_or(false) {
+        // Poll with timeout instead of Maintain::Wait to prevent infinite blocking
+        // when the GPU driver hangs (e.g., after Windows TDR reset).
+        let poll_deadline = Instant::now() + Duration::from_secs(10);
+        let mut gpu_done = false;
+        while Instant::now() < poll_deadline {
+            self.device.poll(wgpu::Maintain::Poll);
+            match receiver.try_recv() {
+                Ok(Ok(())) => { gpu_done = true; break; }
+                Ok(Err(_)) => {
+                    self.staging_buffer.unmap();
+                    return Err("GPU mapping failed (device lost)".to_string());
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_micros(100));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.staging_buffer.unmap();
+                    return Err("GPU callback channel disconnected".to_string());
+                }
+            }
+        }
+
+        if !gpu_done {
+            // GPU didn't respond within timeout — driver is likely hung
+            return Err("GPU timed out after 10s (driver may be hung or TDR occurred)".to_string());
+        }
+
+        let result = {
             let data = buffer_slice.get_mapped_range();
             let results = bytes_to_u32_vec(&data);
             let count = (results[0] as usize).min(256);
             let nonces = results[1..1 + count].to_vec();
-            drop(data); // Drop map range so we can unmap
+            drop(data);
             Ok(nonces)
-        } else {
-            Err("GPU mapping failed (device lost or out of memory)".to_string())
         };
 
         // Unmap the staging buffer so it can be reused next call
@@ -867,72 +891,7 @@ pub(crate) fn create_gpu_backend(
     }
 }
 
-/// Probes GPU compatibility by running a small batch in a **child process**.
-///
-/// If the GPU driver crashes (e.g. STATUS_ACCESS_VIOLATION on AMD Caicos),
-/// only the child process dies — the main app stays alive.
-///
-/// Returns `Ok(device_name)` if the GPU is safe, or `Err(reason)` if not.
-fn probe_gpu_compatibility(
-    device_id: Option<&str>,
-    intensity_percent: u8,
-    app: &AppHandle,
-) -> Result<String, String> {
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("cannot find own executable: {e}"))?;
 
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("--gpu-probe");
-    if let Some(id) = device_id {
-        cmd.arg(id);
-    } else {
-        cmd.arg("auto");
-    }
-    cmd.arg(intensity_percent.to_string());
-
-    // Suppress the child window on Windows (it's a windows_subsystem="windows" exe)
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
-
-    log_message(app, "Running GPU compatibility probe in child process...");
-
-    match cmd.output() {
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if output.status.success() {
-                // Extract device name from probe output
-                let device_name = stderr
-                    .lines()
-                    .find(|l| l.contains("[GPU Probe] OK:"))
-                    .map(|l| l.trim_start_matches("[GPU Probe] OK: ").trim().to_string())
-                    .unwrap_or_else(|| "Unknown GPU".into());
-                log_message(app, &format!("GPU probe passed: {device_name}"));
-                Ok(device_name)
-            } else {
-                let code = output.status.code().unwrap_or(-1);
-                let reason = if code == 1 {
-                    format!("GPU probe failed: {}", stderr.trim())
-                } else {
-                    // Abnormal exit (crash, segfault, etc.)
-                    format!(
-                        "GPU driver crashed during probe (exit code: 0x{:08X}). This GPU is not compatible.",
-                        code as u32
-                    )
-                };
-                log_message(app, &reason);
-                Err(reason)
-            }
-        }
-        Err(e) => {
-            let reason = format!("Failed to launch GPU probe process: {e}");
-            log_message(app, &reason);
-            Err(reason)
-        }
-    }
-}
 
 /// Main GPU hashing loop. Runs in a dedicated thread.
 ///
@@ -949,40 +908,6 @@ pub(crate) fn gpu_hash_loop(
     worker_index: usize,
     total_workers: usize,
 ) {
-    // Step 1: Probe GPU compatibility in a child process.
-    // If the GPU driver would crash (segfault), only the child dies.
-    if let Err(reason) = probe_gpu_compatibility(
-        gpu_device_id.as_deref(),
-        gpu_intensity_percent,
-        &app,
-    ) {
-        log_message(
-            &app,
-            &format!("GPU incompatible: {reason}. Starting CPU fallback worker."),
-        );
-        let shared_clone = Arc::clone(&shared);
-        let sender_clone = share_sender.clone();
-        let app_clone = app.clone();
-        let pool_clone = pool.clone();
-        let fallback_index = worker_index;
-        let fallback_total = total_workers;
-        std::thread::Builder::new()
-            .name("btc-lottery-cpu-fallback".into())
-            .spawn(move || {
-                miner::hash_loop(
-                    fallback_index,
-                    fallback_total,
-                    shared_clone,
-                    sender_clone,
-                    app_clone,
-                    pool_clone,
-                )
-            })
-            .ok();
-        return;
-    }
-
-    // Step 2: Probe passed — create the real GPU backend in this process.
     let mut gpu = match create_gpu_backend(gpu_device_id.as_deref(), gpu_intensity_percent) {
         Ok(gpu) => {
             log_message(
@@ -997,43 +922,10 @@ pub(crate) fn gpu_hash_loop(
             gpu
         }
         Err(error) => {
-            log_message(
-                &app,
-                &format!("GPU init failed: {error}. Starting CPU fallback worker."),
-            );
-            // GPU init failed — spawn a CPU fallback so hashrate isn't zero
-            let shared_clone = Arc::clone(&shared);
-            let sender_clone = share_sender.clone();
-            let app_clone = app.clone();
-            let pool_clone = pool.clone();
-            let fallback_index = worker_index;
-            let fallback_total = total_workers;
-            std::thread::Builder::new()
-                .name("btc-lottery-cpu-fallback".into())
-                .spawn(move || {
-                    miner::hash_loop(
-                        fallback_index,
-                        fallback_total,
-                        shared_clone,
-                        sender_clone,
-                        app_clone,
-                        pool_clone,
-                    )
-                })
-                .ok();
+            log_message(&app, &format!("GPU init failed: {error}"));
             return;
         }
     };
-
-    // Mark GPU thread as alive; ensure it's cleared on exit (any exit path)
-    shared.gpu_thread_alive.store(true, Ordering::Release);
-    struct GpuAliveGuard<'a>(&'a std::sync::atomic::AtomicBool);
-    impl<'a> Drop for GpuAliveGuard<'a> {
-        fn drop(&mut self) {
-            self.0.store(false, Ordering::Release);
-        }
-    }
-    let _alive_guard = GpuAliveGuard(&shared.gpu_thread_alive);
 
     while !shared.stop.load(Ordering::Acquire) {
         let Some(job) = shared.job.read().unwrap().clone() else {
@@ -1070,8 +962,16 @@ pub(crate) fn gpu_hash_loop(
                 u32::from_le_bytes(header[72..76].try_into().unwrap()),
             ];
 
-            // Inner nonce loop: dispatch batches across the full nonce space
+            // Inner nonce loop with adaptive batch sizing.
+            //
+            // Instead of a fixed batch_size that may exceed Windows TDR (2s)
+            // on slow GPUs, we start conservative and dynamically adjust to
+            // keep each dispatch in the 200-500ms sweet spot.
             let mut nonce_start = 0u32;
+            let max_batch = gpu.batch_size();          // upper bound from intensity
+            let min_batch: u32 = 256 * 64;             // 16K — minimum useful work
+            let mut adaptive_batch = min_batch.max(max_batch / 16); // start at ~1/16 of max
+
             loop {
                 if shared.stop.load(Ordering::Acquire)
                     || shared.job_generation.load(Ordering::Acquire) != job.generation
@@ -1079,6 +979,7 @@ pub(crate) fn gpu_hash_loop(
                     break;
                 }
 
+                let dispatch_start = Instant::now();
                 let found_nonces = match gpu.mine_batch(&midstate, &tail, nonce_start, &target) {
                     Ok(nonces) => nonces,
                     Err(err) => {
@@ -1090,46 +991,35 @@ pub(crate) fn gpu_hash_loop(
                         match create_gpu_backend(gpu_device_id.as_deref(), gpu_intensity_percent) {
                             Ok(new_gpu) => {
                                 gpu = new_gpu;
+                                adaptive_batch = min_batch; // reset to conservative
                                 log_message(&app, "GPU re-initialized successfully. Resuming mining.");
                                 continue; // retry this batch
                             }
                             Err(reinit_err) => {
-                                log_message(
-                                    &app,
-                                    &format!("GPU re-initialization failed: {reinit_err}. Falling back to CPU mining."),
-                                );
-                                // Spawn a fallback CPU worker thread using the GPU's
-                                // original slot to avoid extranonce collisions with
-                                // any existing CPU workers.
-                                let shared_clone = Arc::clone(&shared);
-                                let sender_clone = share_sender.clone();
-                                let app_clone = app.clone();
-                                let pool_clone = pool.clone();
-                                let fallback_index = worker_index;
-                                let fallback_total = total_workers;
-                                std::thread::Builder::new()
-                                    .name("btc-lottery-cpu-fallback".into())
-                                    .spawn(move || {
-                                        miner::hash_loop(
-                                            fallback_index,
-                                            fallback_total,
-                                            shared_clone,
-                                            sender_clone,
-                                            app_clone,
-                                            pool_clone,
-                                        )
-                                    })
-                                    .ok();
-                                return; // Exit GPU thread
+                                log_message(&app, &format!("GPU re-initialization failed: {reinit_err}"));
+                                return;
                             }
                         }
                     }
                 };
+                let dispatch_ms = dispatch_start.elapsed().as_millis() as u64;
 
                 // Track hash count
                 shared
                     .hashes
-                    .fetch_add(gpu.batch_size() as u64, Ordering::Relaxed);
+                    .fetch_add(adaptive_batch as u64, Ordering::Relaxed);
+
+                // Adaptive batch sizing: target 200-500ms per dispatch.
+                // - Under 100ms → double (GPU can handle more)
+                // - Over 800ms → halve (approaching TDR danger zone)
+                // - 200-500ms → keep steady (sweet spot)
+                if dispatch_ms < 100 {
+                    adaptive_batch = (adaptive_batch.saturating_mul(2)).min(max_batch);
+                } else if dispatch_ms > 800 {
+                    adaptive_batch = (adaptive_batch / 2).max(min_batch);
+                }
+                // Round to workgroup size
+                adaptive_batch = (adaptive_batch + 255) & !255;
 
                 // Verify each found nonce on the CPU
                 for &nonce in &found_nonces {
@@ -1180,15 +1070,18 @@ pub(crate) fn gpu_hash_loop(
                 }
 
                 // Advance nonce_start; wrap on overflow means we've exhausted the space
-                let next_nonce = match nonce_start.checked_add(gpu.batch_size()) {
+                let next_nonce = match nonce_start.checked_add(adaptive_batch) {
                     Some(next) => next,
                     None => break, // exhausted nonce space
                 };
                 nonce_start = next_nonce;
 
-                // Yield briefly to prevent Windows TDR and keep the desktop responsive.
-                // 1ms is enough to let the GPU driver service display requests.
-                std::thread::sleep(Duration::from_millis(1));
+                // Yield briefly when dispatches are very fast to prevent GPU
+                // monopolization.  When dispatches are >= 100ms, the GPU driver
+                // already had time to service display requests.
+                if dispatch_ms < 100 {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
             }
 
             extranonce_counter = extranonce_counter.wrapping_add(total_workers as u64);

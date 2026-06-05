@@ -24,9 +24,8 @@ const DEFAULT_CONFIG: &str = include_str!("../../config.json");
 enum ComputeMode {
     #[default]
     Cpu,
-    GpuSim,
-    GpuBenchmark,
-    GpuRealExperimental,
+    Gpu,
+    Hybrid,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -129,7 +128,7 @@ impl AppConfig {
                 self.gpu_enabled = false;
                 self.gpu_device_id = None;
             }
-            ComputeMode::GpuSim | ComputeMode::GpuBenchmark | ComputeMode::GpuRealExperimental => {
+            ComputeMode::Gpu | ComputeMode::Hybrid => {
                 self.gpu_enabled = true;
             }
         }
@@ -451,20 +450,7 @@ fn tray_icon() -> Image<'static> {
     Image::new_owned(rgba, SIZE, SIZE)
 }
 
-/// GPU compatibility probe — runs a single small mining batch.
-/// Called from main.rs when `--gpu-probe` flag is present.
-/// This runs in a child process to safely detect driver crashes.
-pub fn gpu_probe(device_id: Option<&str>, intensity_percent: u8) -> Result<String, String> {
-    let mut gpu = gpu_miner::create_gpu_backend(device_id, intensity_percent)?;
 
-    // Run one small batch with dummy data
-    let midstate = gpu_miner::sha256_midstate(&[0u8; 64]);
-    let tail = [0u32; 3];
-    let target = [0u32; 8]; // impossible target — don't care about matches
-    gpu.mine_batch(&midstate, &tail, 0, &target)?;
-
-    Ok(gpu.device_name().to_owned())
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -545,7 +531,7 @@ mod tests {
     fn normalizes_saved_config_to_safe_startup_values() {
         let config = AppConfig {
             real_mining_enabled: true,
-            compute_mode: ComputeMode::GpuRealExperimental,
+            compute_mode: ComputeMode::Gpu,
             gpu_enabled: true,
             gpu_device_id: Some("simulated-gpu".into()),
             ..AppConfig::default()
@@ -554,21 +540,21 @@ mod tests {
         let normalized = config.normalized();
 
         assert!(!normalized.real_mining_enabled);
-        assert_eq!(normalized.compute_mode, ComputeMode::GpuRealExperimental);
+        assert_eq!(normalized.compute_mode, ComputeMode::Gpu);
         assert!(normalized.gpu_enabled);
     }
 
     #[test]
     fn compute_mode_controls_gpu_enabled_flag() {
         let config = AppConfig {
-            compute_mode: ComputeMode::GpuSim,
+            compute_mode: ComputeMode::Gpu,
             gpu_enabled: false,
             ..AppConfig::default()
         };
 
         let normalized = config.normalized();
 
-        assert_eq!(normalized.compute_mode, ComputeMode::GpuSim);
+        assert_eq!(normalized.compute_mode, ComputeMode::Gpu);
         assert!(normalized.gpu_enabled);
     }
 
