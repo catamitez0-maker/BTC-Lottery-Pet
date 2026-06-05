@@ -65,6 +65,11 @@ interface RealMiningStats {
   best_difficulty: number;
   current_job_id: string;
   connection_status: string;
+  gpu_backend: string;
+  gpu_device_name: string;
+  gpu_dispatch_size: number;
+  gpu_dispatch_ms: number;
+  gpu_throttle_ms: number;
 }
 
 interface BlockFoundEvent {
@@ -118,6 +123,11 @@ const idleRealStats: RealMiningStats = {
   best_difficulty: 0,
   current_job_id: "",
   connection_status: "Stopped",
+  gpu_backend: "",
+  gpu_device_name: "",
+  gpu_dispatch_size: 0,
+  gpu_dispatch_ms: 0,
+  gpu_throttle_ms: 0,
 };
 
 const runningInTauri = isTauri();
@@ -166,24 +176,64 @@ function formatHashrate(hashrate: number) {
   return `${hashrate.toFixed(0)} H/s`;
 }
 
+function formatDispatchSize(dispatchSize: number) {
+  if (!dispatchSize) {
+    return "Waiting";
+  }
+
+  return Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(dispatchSize);
+}
+
 function threadsForPreset(
   preset: PerformancePreset,
   systemInfo: SystemInfo,
   customThreads: number,
-  gpuEnabled = false,
+  gpuOnly = false,
 ) {
+  if (gpuOnly) {
+    return 0;
+  }
+
+  const availableThreads = Math.max(1, systemInfo.available_parallelism);
+  const recommendedThreads = Math.min(
+    availableThreads,
+    Math.max(1, systemInfo.recommended_cpu_threads),
+  );
+
   switch (preset) {
     case "eco":
-      return gpuEnabled ? 0 : 1;
+      return 1;
     case "normal":
-      return gpuEnabled ? 0 : systemInfo.recommended_cpu_threads;
+      return recommendedThreads;
     case "turbo":
-      return gpuEnabled
-        ? systemInfo.available_parallelism
-        : systemInfo.available_parallelism;
+      return availableThreads;
     case "custom":
-      return Math.min(Math.max(gpuEnabled ? 0 : 1, customThreads), systemInfo.available_parallelism);
+      return Math.min(Math.max(1, customThreads), availableThreads);
   }
+}
+
+function isGpuComputeMode(mode: ComputeMode) {
+  return mode === "gpu" || mode === "hybrid";
+}
+
+function hasHardwareGpuDevice(devices: GpuDevice[]) {
+  return devices.some((device) => device.id !== "auto" && !device.simulated);
+}
+
+function hasSoftwareGpuDevice(devices: GpuDevice[]) {
+  return devices.some((device) => device.id !== "auto" && device.simulated);
+}
+
+function sanitizeGpuDeviceId(deviceId: string | null, devices: GpuDevice[]) {
+  if (!deviceId || deviceId === "auto") {
+    return null;
+  }
+
+  const device = devices.find((candidate) => candidate.id === deviceId);
+  return device && !device.simulated ? deviceId : null;
 }
 
 function performancePresetLabel(preset: PerformancePreset) {
@@ -643,7 +693,7 @@ function App() {
     return () => window.clearInterval(timer);
   }, [config.enable_notifications, config.heartbeat_interval]);
 
-  const gpuEnabled = config.compute_mode === "gpu" || config.compute_mode === "hybrid";
+  const gpuEnabled = isGpuComputeMode(config.compute_mode);
 
   // Simulation Mining Loop
   useEffect(() => {
@@ -799,11 +849,18 @@ function App() {
       return;
     }
 
-    if (
+    const realCpuThreads = threadsForPreset(
+      config.performance_preset,
+      systemInfo,
+      config.cpu_threads,
+      config.compute_mode === "gpu",
+    );
+    const highCpuRequested =
+      realCpuThreads > 0 &&
       (config.performance_preset === "turbo" ||
-        config.cpu_threads > systemInfo.recommended_cpu_threads) &&
-      !window.confirm("High CPU usage may heat your computer. Continue?")
-    ) {
+        realCpuThreads > systemInfo.recommended_cpu_threads);
+
+    if (highCpuRequested && !window.confirm("High CPU usage may heat your computer. Continue?")) {
       return;
     }
 
@@ -817,6 +874,11 @@ function App() {
       rejected_shares: 0,
       current_job_id: "",
       connection_status: "Connecting",
+      gpu_backend: "",
+      gpu_device_name: "",
+      gpu_dispatch_size: 0,
+      gpu_dispatch_ms: 0,
+      gpu_throttle_ms: 0,
     }));
 
     try {
@@ -826,15 +888,10 @@ function App() {
           poolPort: config.pool_port,
           btcAddress: config.btc_address,
           workerName: config.worker_name,
-          cpuThreads: threadsForPreset(
-            config.performance_preset,
-            systemInfo,
-            config.cpu_threads,
-            config.gpu_enabled && (config.compute_mode === "gpu" || config.compute_mode === "hybrid"),
-          ),
+          cpuThreads: realCpuThreads,
           confirmedCpuUse: true,
-          gpuEnabled: config.gpu_enabled,
-          gpuDeviceId: config.gpu_device_id,
+          gpuEnabled,
+          gpuDeviceId: sanitizeGpuDeviceId(config.gpu_device_id, gpuDevices),
           gpuIntensityPercent: config.gpu_intensity_percent,
         },
       });
@@ -923,13 +980,17 @@ function App() {
     setErrorMessage("");
 
     const performancePreset = draftConfig.performance_preset;
-    const isGpuMode = draftConfig.compute_mode === "gpu" || draftConfig.compute_mode === "hybrid";
+    const isGpuMode = isGpuComputeMode(draftConfig.compute_mode);
+    const isGpuOnly = draftConfig.compute_mode === "gpu";
     const cpuThreads = threadsForPreset(
       performancePreset,
       systemInfo,
       Number(draftConfig.cpu_threads),
-      isGpuMode,
+      isGpuOnly,
     );
+    const gpuDeviceId = isGpuMode
+      ? sanitizeGpuDeviceId(draftConfig.gpu_device_id, gpuDevices)
+      : null;
 
     const settings: AppConfig = {
       ...draftConfig,
@@ -938,7 +999,7 @@ function App() {
       performance_preset: performancePreset,
       real_mining_enabled: false,
       gpu_enabled: isGpuMode,
-      gpu_device_id: isGpuMode ? draftConfig.gpu_device_id : null,
+      gpu_device_id: gpuDeviceId,
     };
 
     try {
@@ -960,10 +1021,11 @@ function App() {
 
   const runGpuBenchmark = async () => {
     setErrorMessage("");
+    const gpuDeviceId = sanitizeGpuDeviceId(draftConfig.gpu_device_id, gpuDevices);
 
     try {
       const result = await invoke<GpuBenchmarkResult>("run_gpu_benchmark", {
-        gpuDeviceId: draftConfig.gpu_device_id,
+        gpuDeviceId,
         gpuIntensityPercent: Number(draftConfig.gpu_intensity_percent),
       });
       setBenchmarkResult(result);
@@ -975,9 +1037,9 @@ function App() {
 
       const gpuIntensityPercent = Number(draftConfig.gpu_intensity_percent);
       setBenchmarkResult({
-        device_id: draftConfig.gpu_device_id || "auto",
+        device_id: gpuDeviceId || "auto",
         device_name:
-          gpuDevices.find((device) => device.id === draftConfig.gpu_device_id)?.name || "Auto",
+          gpuDevices.find((device) => device.id === gpuDeviceId)?.name || "Auto",
         simulated: true,
         gpu_intensity_percent: gpuIntensityPercent,
         hashrate: 120_000_000 * gpuIntensityPercent / 10,
@@ -1094,7 +1156,7 @@ function App() {
     config.performance_preset,
     systemInfo,
     config.cpu_threads,
-    config.gpu_enabled && (config.compute_mode === "gpu" || config.compute_mode === "hybrid"),
+    config.compute_mode === "gpu",
   );
 
   const modeLabel = realModeEnabled
@@ -1110,7 +1172,20 @@ function App() {
     ["CPU THREADS", `${effectiveCpuThreads}`],
     ["RECOMMENDED", `${systemInfo.recommended_cpu_threads}`],
     ["MODE", modeLabel],
-    ...(config.compute_mode !== "cpu" ? [["GPU INTENSITY", `${config.gpu_intensity_percent}%`]] : []),
+    ...(config.compute_mode !== "cpu" ? [["GPU LIMIT", `${config.gpu_intensity_percent}%`]] : []),
+    ...(realModeEnabled && gpuEnabled
+      ? [
+          ["GPU BACKEND", realStats.gpu_backend || "Starting"],
+          ["GPU DEVICE", realStats.gpu_device_name || "Detecting"],
+          [
+            "GPU DISPATCH",
+            realStats.gpu_dispatch_size
+              ? `${formatDispatchSize(realStats.gpu_dispatch_size)} / ${realStats.gpu_dispatch_ms}ms`
+              : "Waiting",
+          ],
+          ["GPU THROTTLE", realStats.gpu_throttle_ms ? `${realStats.gpu_throttle_ms}ms` : "Off"],
+        ]
+      : []),
   ];
   const metrics = [
     ["HASHRATE", displayedHashrate],
@@ -1121,15 +1196,28 @@ function App() {
     ["MINING UPTIME", formatUptime(miningUptime)],
   ];
 
-  const isDraftGpuMode = draftConfig.compute_mode === "gpu" || draftConfig.compute_mode === "hybrid";
+  const isDraftGpuOnly = draftConfig.compute_mode === "gpu";
+  const hardwareGpuAvailable = hasHardwareGpuDevice(gpuDevices);
+  const softwareGpuAvailable = hasSoftwareGpuDevice(gpuDevices);
+  const draftEffectiveCpuThreads = threadsForPreset(
+    draftConfig.performance_preset,
+    systemInfo,
+    Number(draftConfig.cpu_threads),
+    isDraftGpuOnly,
+  );
   const cpuThreadOptions = useMemo(() => {
     const available = Math.max(1, systemInfo.available_parallelism);
     const rec = systemInfo.recommended_cpu_threads;
-    const base = isDraftGpuMode ? [0, 1, 2, rec, 4, available] : [1, 2, rec, 4, available];
+    const base = isDraftGpuOnly ? [0] : [1, 2, rec, draftEffectiveCpuThreads, 4, available];
     return Array.from(new Set(base))
-      .filter((threads) => threads <= available)
+      .filter((threads) => threads <= available && (isDraftGpuOnly ? threads === 0 : threads >= 1))
       .sort((left, right) => left - right);
-  }, [systemInfo.available_parallelism, systemInfo.recommended_cpu_threads, isDraftGpuMode]);
+  }, [
+    draftEffectiveCpuThreads,
+    systemInfo.available_parallelism,
+    systemInfo.recommended_cpu_threads,
+    isDraftGpuOnly,
+  ]);
 
   return (
     <main className={`pet-shell ${displayMode} ${petStatus === "Lucky Flash" || petStatus === "Jackpot" ? "lucky" : ""}`}>
@@ -1403,80 +1491,29 @@ function App() {
                   }
                 />
               </label>
-              <label>
-                PERFORMANCE PRESET
-                <select
-                  value={draftConfig.performance_preset}
-                  onChange={(event) => {
-                    const performancePreset = event.target.value as PerformancePreset;
-                    setDraftConfig({
-                      ...draftConfig,
-                      performance_preset: performancePreset,
-                      cpu_threads: threadsForPreset(
-                        performancePreset,
-                        systemInfo,
-                        Number(draftConfig.cpu_threads),
-                        draftConfig.compute_mode === "gpu" || draftConfig.compute_mode === "hybrid",
-                      ),
-                    });
-                  }}
-                >
-                  <option value="eco">
-                    Eco - {(draftConfig.compute_mode === "gpu") ? "GPU only" : "1 thread"}
-                  </option>
-                  <option value="normal">
-                    Normal - {(draftConfig.compute_mode === "gpu")
-                      ? `GPU + 0 threads`
-                      : `${systemInfo.recommended_cpu_threads} threads`}
-                  </option>
-                  <option value="turbo">
-                    Turbo - {systemInfo.available_parallelism} threads
-                    {(draftConfig.compute_mode === "gpu" || draftConfig.compute_mode === "hybrid") ? " + GPU" : ""}
-                  </option>
-                  <option value="custom">Custom</option>
-                </select>
-              </label>
-              <label>
-                CPU THREADS
-                <select
-                  disabled={draftConfig.performance_preset !== "custom"}
-                  value={draftConfig.cpu_threads}
-                  onChange={(event) =>
-                    setDraftConfig({
-                      ...draftConfig,
-                      performance_preset: "custom",
-                      cpu_threads: Number(event.target.value),
-                    })
-                  }
-                >
-                  {cpuThreadOptions.map((threads) => (
-                    <option key={threads} value={threads}>
-                      {threads === 0
-                        ? "0 threads (GPU only)"
-                        : `${threads} thread${threads === 1 ? "" : "s"}${threads === systemInfo.available_parallelism ? " (max)" : ""}`}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
+              <label className="full-width">
                 COMPUTE MODE
                 <select
                   value={draftConfig.compute_mode}
                   onChange={(event) => {
                     const computeMode = event.target.value as ComputeMode;
-                    const isGpu = computeMode === "gpu" || computeMode === "hybrid";
+                    const isGpu = isGpuComputeMode(computeMode);
                     setDraftConfig({
                       ...draftConfig,
                       compute_mode: computeMode,
                       gpu_enabled: isGpu,
-                      gpu_device_id: isGpu ? (draftConfig.gpu_device_id || "auto") : null,
+                      gpu_device_id: isGpu
+                        ? sanitizeGpuDeviceId(draftConfig.gpu_device_id, gpuDevices)
+                        : null,
                       performance_preset: draftConfig.performance_preset,
-                      cpu_threads: threadsForPreset(
-                        draftConfig.performance_preset,
-                        systemInfo,
-                        Number(draftConfig.cpu_threads),
-                        computeMode === "gpu" || computeMode === "hybrid",
-                      ),
+                      cpu_threads: computeMode === "gpu"
+                        ? Number(draftConfig.cpu_threads)
+                        : threadsForPreset(
+                            draftConfig.performance_preset,
+                            systemInfo,
+                            Number(draftConfig.cpu_threads),
+                            false,
+                          ),
                     });
                   }}
                 >
@@ -1485,38 +1522,123 @@ function App() {
                   <option value="hybrid">CPU + GPU</option>
                 </select>
               </label>
+              <div className="compute-status full-width" aria-label="Compute status">
+                <span>ACTIVE PLAN</span>
+                <strong>
+                  {draftConfig.compute_mode === "cpu"
+                    ? `${draftEffectiveCpuThreads} CPU thread${draftEffectiveCpuThreads === 1 ? "" : "s"}`
+                    : draftConfig.compute_mode === "gpu"
+                      ? "GPU worker, 0 CPU hash threads"
+                      : `${draftEffectiveCpuThreads} CPU thread${draftEffectiveCpuThreads === 1 ? "" : "s"} + GPU worker`}
+                </strong>
+                <p className="field-hint">
+                  {draftConfig.compute_mode === "cpu"
+                    ? "GPU controls stay disabled in CPU Only mode."
+                    : draftConfig.compute_mode === "gpu"
+                      ? "CPU presets are ignored in GPU Only mode. Use GPU Limit below to reduce GPU pressure."
+                      : "Performance Preset controls only the CPU side of Hybrid mode."}
+                </p>
+              </div>
+              {!isDraftGpuOnly ? (
+                <>
+                  <label>
+                    PERFORMANCE PRESET
+                    <select
+                      value={draftConfig.performance_preset}
+                      onChange={(event) => {
+                        const performancePreset = event.target.value as PerformancePreset;
+                        setDraftConfig({
+                          ...draftConfig,
+                          performance_preset: performancePreset,
+                          cpu_threads: threadsForPreset(
+                            performancePreset,
+                            systemInfo,
+                            Number(draftConfig.cpu_threads),
+                            false,
+                          ),
+                        });
+                      }}
+                    >
+                      <option value="eco">Eco - 1 CPU thread</option>
+                      <option value="normal">
+                        Normal - {systemInfo.recommended_cpu_threads} CPU thread{systemInfo.recommended_cpu_threads === 1 ? "" : "s"}
+                      </option>
+                      <option value="turbo">
+                        Turbo - {systemInfo.available_parallelism} CPU thread{systemInfo.available_parallelism === 1 ? "" : "s"}
+                      </option>
+                      <option value="custom">Custom</option>
+                    </select>
+                  </label>
+                  <label>
+                    CPU THREADS
+                    <select
+                      disabled={draftConfig.performance_preset !== "custom"}
+                      value={draftEffectiveCpuThreads}
+                      onChange={(event) =>
+                        setDraftConfig({
+                          ...draftConfig,
+                          performance_preset: "custom",
+                          cpu_threads: Number(event.target.value),
+                        })
+                      }
+                    >
+                      {cpuThreadOptions.map((threads) => (
+                        <option key={threads} value={threads}>
+                          {threads} thread{threads === 1 ? "" : "s"}{threads === systemInfo.available_parallelism ? " (max)" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </>
+              ) : (
+                <div className="compute-status full-width" aria-label="CPU workers">
+                  <span>CPU WORKERS</span>
+                  <strong>0 threads (GPU only)</strong>
+                  <p className="field-hint">
+                    Real mining will start one GPU worker and no CPU hash workers.
+                  </p>
+                </div>
+              )}
               {draftConfig.compute_mode !== "cpu" && (
                 <>
                   <label>
                     GPU DEVICE
                     <select
-                      value={draftConfig.gpu_device_id || "auto"}
+                      value={sanitizeGpuDeviceId(draftConfig.gpu_device_id, gpuDevices) || "auto"}
                       onChange={(event) =>
                         setDraftConfig({
                           ...draftConfig,
-                          gpu_device_id: event.target.value === "auto" ? null : event.target.value,
+                          gpu_device_id: sanitizeGpuDeviceId(
+                            event.target.value === "auto" ? null : event.target.value,
+                            gpuDevices,
+                          ),
                         })
                       }
                     >
                       {gpuDevices.map((device) => (
-                        <option key={device.id} value={device.id}>
-                          {device.name}
+                        <option key={device.id} value={device.id} disabled={device.simulated && device.id !== "auto"}>
+                          {device.name}{device.simulated && device.id !== "auto" ? " (software - disabled)" : ""}
                         </option>
                       ))}
                     </select>
-                    {gpuDevices.length <= 1 && (
+                    {!hardwareGpuAvailable && !softwareGpuAvailable && (
                       <p className="field-hint warning">
-                        ⚠ No compatible GPU detected. Try updating your GPU drivers.
+                        No compatible GPU detected. Try updating your GPU drivers.
                       </p>
                     )}
-                    {gpuDevices.some((d) => d.simulated && d.id !== "auto") && (
+                    {!hardwareGpuAvailable && softwareGpuAvailable && (
                       <p className="field-hint warning">
-                        ⚠ Only software GPU (WARP) found — slower than CPU mining.
+                        Only software GPU adapters were detected. They are disabled for real mining.
+                      </p>
+                    )}
+                    {hardwareGpuAvailable && softwareGpuAvailable && (
+                      <p className="field-hint">
+                        Software adapters are disabled. Auto will prefer a hardware GPU backend.
                       </p>
                     )}
                   </label>
                   <label>
-                    GPU INTENSITY
+                    GPU LIMIT
                     <select
                       value={draftConfig.gpu_intensity_percent}
                       onChange={(event) =>
@@ -1532,19 +1654,12 @@ function App() {
                         </option>
                       ))}
                     </select>
+                    <p className="field-hint">
+                      Soft duty-cycle limiter. 100% means no intentional throttle sleep.
+                    </p>
                   </label>
                 </>
               )}
-              <div className="compute-status" aria-label="Compute status">
-                <span>MODE</span>
-                <strong>
-                  {draftConfig.compute_mode === "cpu"
-                    ? "CPU ONLY"
-                    : draftConfig.compute_mode === "gpu"
-                      ? "GPU ONLY"
-                      : "CPU + GPU"}
-                </strong>
-              </div>
               <label>
                 ENABLE NOTIFICATIONS
                 <select
@@ -1669,6 +1784,10 @@ function App() {
                   <div>
                     <span>Device</span>
                     <strong>{benchmarkResult.device_name}</strong>
+                  </div>
+                  <div>
+                    <span>Mode</span>
+                    <strong>{benchmarkResult.simulated ? "Simulated" : "Real GPU"}</strong>
                   </div>
                   <div>
                     <span>Hashrate</span>

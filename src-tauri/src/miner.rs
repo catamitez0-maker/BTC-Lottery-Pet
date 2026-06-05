@@ -152,6 +152,11 @@ pub struct MiningStats {
     pub best_difficulty: f64,
     pub current_job_id: String,
     pub connection_status: String,
+    pub gpu_backend: String,
+    pub gpu_device_name: String,
+    pub gpu_dispatch_size: u64,
+    pub gpu_dispatch_ms: u64,
+    pub gpu_throttle_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -175,6 +180,11 @@ impl MiningStats {
             best_difficulty: 0.0,
             current_job_id: String::new(),
             connection_status: "Stopped".into(),
+            gpu_backend: String::new(),
+            gpu_device_name: String::new(),
+            gpu_dispatch_size: 0,
+            gpu_dispatch_ms: 0,
+            gpu_throttle_ms: 0,
         }
     }
 }
@@ -238,6 +248,11 @@ pub(crate) struct SharedMiningState {
     pub(crate) rejected_shares: AtomicU64,
     pub(crate) best_difficulty_bits: AtomicU64,
     pub(crate) connection_status: Mutex<String>,
+    pub(crate) gpu_backend: Mutex<String>,
+    pub(crate) gpu_device_name: Mutex<String>,
+    pub(crate) gpu_dispatch_size: AtomicU64,
+    pub(crate) gpu_dispatch_ms: AtomicU64,
+    pub(crate) gpu_throttle_ms: AtomicU64,
 
 }
 
@@ -252,12 +267,28 @@ impl SharedMiningState {
             rejected_shares: AtomicU64::new(0),
             best_difficulty_bits: AtomicU64::new(0.0_f64.to_bits()),
             connection_status: Mutex::new("Starting".into()),
+            gpu_backend: Mutex::new(String::new()),
+            gpu_device_name: Mutex::new(String::new()),
+            gpu_dispatch_size: AtomicU64::new(0),
+            gpu_dispatch_ms: AtomicU64::new(0),
+            gpu_throttle_ms: AtomicU64::new(0),
 
         }
     }
 
     pub(crate) fn set_connection_status(&self, status: impl Into<String>) {
         *self.connection_status.lock().unwrap() = status.into();
+    }
+
+    pub(crate) fn set_gpu_runtime(&self, backend: impl Into<String>, device_name: impl Into<String>) {
+        *self.gpu_backend.lock().unwrap() = backend.into();
+        *self.gpu_device_name.lock().unwrap() = device_name.into();
+    }
+
+    pub(crate) fn set_gpu_dispatch_stats(&self, dispatch_size: u64, dispatch_ms: u64, throttle_ms: u64) {
+        self.gpu_dispatch_size.store(dispatch_size, Ordering::Relaxed);
+        self.gpu_dispatch_ms.store(dispatch_ms, Ordering::Relaxed);
+        self.gpu_throttle_ms.store(throttle_ms, Ordering::Relaxed);
     }
 
     pub(crate) fn set_job(&self, mut job: JobTemplate) {
@@ -302,6 +333,11 @@ impl SharedMiningState {
             best_difficulty: f64::from_bits(self.best_difficulty_bits.load(Ordering::Relaxed)),
             current_job_id,
             connection_status: self.connection_status.lock().unwrap().clone(),
+            gpu_backend: self.gpu_backend.lock().unwrap().clone(),
+            gpu_device_name: self.gpu_device_name.lock().unwrap().clone(),
+            gpu_dispatch_size: self.gpu_dispatch_size.load(Ordering::Relaxed),
+            gpu_dispatch_ms: self.gpu_dispatch_ms.load(Ordering::Relaxed),
+            gpu_throttle_ms: self.gpu_throttle_ms.load(Ordering::Relaxed),
         }
     }
 }

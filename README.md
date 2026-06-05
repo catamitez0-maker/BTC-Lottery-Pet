@@ -16,11 +16,12 @@ This project does not promise or guarantee any financial return.
 - Always-on-top window with a user-controlled `PIN` / `FREE` toggle
 - System tray icon with `Show`, `Hide`, `Open Logs`, and `Quit`
 - Default simulation mode with locally generated stats
-- Explicitly enabled real mining mode with a CPU-use warning
+- Explicitly enabled real mining mode with a CPU/GPU-use warning
 - User-controlled BTC address, pool host, pool port, worker name, and CPU thread
   selector
-- Safe GPU simulation mode with selectable simulated device and intensity
-- Placeholder GPU benchmark that does not start a real GPU workload
+- Real GPU mining modes using `wgpu` first and OpenCL fallback when available
+- GPU-only and CPU+GPU compute modes with backend/device diagnostics
+- Real GPU benchmark for local hardware smoke testing
 - Single-instance protection per app identifier: launching the same flavor
   again focuses its existing window
 - Rust Stratum v1 client and cancellable SHA-256d hash loop
@@ -88,12 +89,13 @@ The Rust backend owns all real mining work:
    `mining.notify`.
 4. Build the coinbase transaction, Merkle root, and Bitcoin block-header
    candidate.
-5. Run SHA-256d nonce loops using no more than the configured CPU thread count.
+5. Run SHA-256d nonce loops using no more than the configured CPU thread count
+   plus one GPU worker when GPU mining is explicitly enabled.
 6. Send qualifying shares with `mining.submit`.
 7. Emit only UI statistics: hashrate, accepted shares, rejected shares, best
-   difficulty, current job ID, and connection status. Mining stats are emitted
-   at most once per second during real mining, except for the immediate local
-   `Stopped` state emitted after the user clicks `STOP`.
+   difficulty, current job ID, connection status, and GPU runtime diagnostics.
+   Mining stats are emitted at most once per second during real mining, except
+   for the immediate local `Stopped` state emitted after the user clicks `STOP`.
 8. Compare each candidate header hash against the network target derived from
    `nbits`; if it meets that target, emit a local `block-found` event, write
    `found_block.json`, and keep the normal share-submission path active.
@@ -168,15 +170,19 @@ Enabling real mode is a session-only UI action. Every app launch starts in
 simulation mode, and mining begins only after the user clicks `START`.
 
 GPU settings also start conservatively. The default `compute_mode` is `cpu`,
-the internal `gpu_enabled` flag is `false`, and GPU intensity defaults to `10`.
-The backend refuses to preserve `gpu_real_experimental` as a startup mode:
-loading or saving that value resets it to `cpu`.
+the internal `gpu_enabled` flag is `false`, and `gpu_intensity_percent`
+defaults to `10`. The UI presents that field as `GPU Limit` because it is a
+soft duty-cycle limiter, not an operating-system-enforced power cap. Current
+compute mode values are `cpu`, `gpu`, and `hybrid`. Legacy or unknown GPU modes
+are normalized back to a safe startup configuration.
 
 ## Performance presets
 
 The settings panel asks the Rust backend for the computer's available logical
 CPU thread count and presents safe choices from `1`, `2`, `4`, and the detected
-maximum without exceeding that maximum.
+maximum without exceeding that maximum. `Compute Mode` is the source of truth:
+`CPU Only` and `CPU + GPU` show CPU preset controls, while `GPU Only` shows a
+read-only `0` CPU worker summary instead of editable CPU controls.
 
 | Preset | Real CPU mining threads |
 | --- | ---: |
@@ -184,6 +190,11 @@ maximum without exceeding that maximum.
 | `Normal` | Backend recommended thread count, currently up to `2` |
 | `Turbo` | Detected logical CPU thread count |
 | `Custom` | User-selected `CPU THREADS` value |
+
+In `GPU Only` mode the UI starts real mining with `0` CPU hash threads and one
+GPU worker. In `CPU + GPU` mode the selected preset controls the CPU workers and
+the GPU worker runs alongside them; Hybrid is not silently downgraded to GPU
+only.
 
 Starting real CPU mining with `Turbo` or a custom thread count above the
 backend recommendation displays:
@@ -232,24 +243,34 @@ Heartbeat notifications are coarse-grained only: `off`, `30min`, `1h`, or
 `6h`. They include status, hashrate, accepted/rejected shares, best difficulty,
 uptime, and pool host/port. They are never sent once per second.
 
-## GPU framework status
+## GPU mining status
 
-GPU support is currently a safe framework, not real GPU mining:
+GPU support is experimental real local mining. It still requires manual real
+mining enablement in the UI and never starts automatically.
 
 | Compute mode | Current behavior |
 | --- | --- |
 | `CPU` | Local simulation, or explicitly confirmed real CPU mining. |
-| `GPU Sim` | Local-only simulated higher hashrate and an `Overdrive` pet visual. It does not call a GPU API. |
-| `GPU Benchmark` | Placeholder benchmark returning a simulated result. It does not connect to a pool and no real GPU workload is started. |
-| `GPU Real Experimental` | Disabled and marked `Coming Soon`. It cannot be saved as the startup mode. |
+| `GPU Only` | Explicit real mining with one GPU worker and `0` CPU hash threads. |
+| `CPU + GPU` | Explicit real mining with the selected CPU preset plus one GPU worker. |
 
-The placeholder device list currently contains `Auto` and `Simulated GPU`.
-GPU intensity choices are `10%`, `25%`, `50%`, `75%`, and `100%`. These values
-only affect GPU simulation and the placeholder benchmark today.
+The GPU backend tries `wgpu` first and falls back to OpenCL when possible.
+Software adapters such as WARP are rejected for real GPU mining because they
+can be slower than CPU mining. The settings panel disables detected software
+GPU entries, while `Auto` still lets the backend select the best available
+hardware path.
 
-Compute Mode is the only GPU control in the settings panel. There is no separate
-user-controlled GPU checkbox: `CPU` keeps GPU features disabled, `GPU Sim`
-enables simulation, and `GPU Benchmark` enables only the placeholder benchmark.
+GPU Limit choices are `10%`, `25%`, `50%`, `75%`, and `100%`. This value is a
+soft local limiter: it sets the upper batch size and the target GPU duty cycle
+for real mining. For example, `10%` sleeps after each GPU dispatch to keep the
+worker cool, while `100%` runs without intentional throttle sleep. This is not
+an operating-system-enforced power cap, but it prevents the miner loop from
+submitting GPU work continuously at low limit settings.
+
+Detail mode shows the active GPU backend, device name, dispatch size, last
+dispatch latency, and throttle sleep. The backend also writes a low-frequency
+`GPU perf` diagnostic log line so unexpectedly low hashrate can be traced to
+backend choice, device, dispatch timing, or throttle settings.
 
 ## Prerequisites on Windows
 

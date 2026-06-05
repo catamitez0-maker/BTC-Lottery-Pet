@@ -17,6 +17,12 @@ use opencl3::platform::get_platforms;
 use opencl3::program::Program;
 use opencl3::types::{cl_uint, CL_BLOCKING};
 
+const GPU_WORKGROUP_SIZE: u32 = 256;
+const GPU_MIN_DISPATCH: u32 = GPU_WORKGROUP_SIZE * 256; // 65,536 nonces
+const GPU_START_DISPATCH: u32 = GPU_WORKGROUP_SIZE * 1024; // 262,144 nonces
+const DIFF_ONE_TARGET_HIGH64: f64 = 65_535.0 * 65_536.0;
+const GPU_MAX_THROTTLE_SLEEP: Duration = Duration::from_secs(10);
+
 // SHA-256 round constants
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
@@ -103,8 +109,7 @@ pub(crate) fn sha256_midstate(first_block: &[u8; 64]) -> [u32; 8] {
 /// DIFF_ONE_TARGET = 0xFFFF * 2^208, represented as words: [0, 0xFFFF0000, 0, 0, 0, 0, 0, 0].
 /// target = DIFF_ONE_TARGET / difficulty
 pub(crate) fn difficulty_to_target_words(difficulty: f64) -> [u32; 8] {
-    // For very low difficulty, return max target (any hash matches)
-    if difficulty < 1.5e-5 {
+    if difficulty <= 0.0 || !difficulty.is_finite() {
         return [0xFFFFFFFF; 8];
     }
 
@@ -117,13 +122,53 @@ pub(crate) fn difficulty_to_target_words(difficulty: f64) -> [u32; 8] {
     // words[0] = shifted >> 32
     // words[1] = shifted as u32
 
-    let mantissa = 65535.0 / difficulty;
-    let shifted = (mantissa * 65536.0) as u64;
+    let shifted = DIFF_ONE_TARGET_HIGH64 / difficulty;
+    if !shifted.is_finite() || shifted >= u64::MAX as f64 {
+        return [0xFFFFFFFF; 8];
+    }
 
     let mut words = [0u32; 8];
-    words[0] = (shifted >> 32) as u32;
-    words[1] = shifted as u32;
+    let high64 = shifted as u64;
+    words[0] = (high64 >> 32) as u32;
+    words[1] = high64 as u32;
     words
+}
+
+fn normalize_dispatch_size(requested: u32, max_batch: u32) -> u32 {
+    let max_batch = max_batch.max(GPU_WORKGROUP_SIZE);
+    let clamped = requested.clamp(GPU_WORKGROUP_SIZE, max_batch);
+    clamped - (clamped % GPU_WORKGROUP_SIZE)
+}
+
+fn min_dispatch_size(max_batch: u32) -> u32 {
+    normalize_dispatch_size(GPU_MIN_DISPATCH.min(max_batch), max_batch)
+}
+
+fn initial_dispatch_size(max_batch: u32) -> u32 {
+    normalize_dispatch_size(GPU_START_DISPATCH.min(max_batch), max_batch)
+}
+
+fn gpu_throttle_sleep_duration(intensity_percent: u8, active_ms: u64) -> Duration {
+    let duty_percent = intensity_percent.clamp(1, 100) as u128;
+    if duty_percent >= 100 || active_ms == 0 {
+        return Duration::ZERO;
+    }
+
+    let sleep_ms = (active_ms as u128)
+        .saturating_mul(100 - duty_percent)
+        / duty_percent;
+    Duration::from_millis((sleep_ms.min(GPU_MAX_THROTTLE_SLEEP.as_millis())) as u64)
+}
+
+fn sleep_until_stopped(stop: &std::sync::atomic::AtomicBool, duration: Duration) {
+    let deadline = Instant::now() + duration;
+    while !stop.load(Ordering::Acquire) {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        std::thread::sleep((deadline - now).min(Duration::from_millis(50)));
+    }
 }
 
 /// Information about an available GPU device.
@@ -146,6 +191,16 @@ fn is_wgpu_software_adapter(info: &wgpu::AdapterInfo) -> bool {
     ) || info.name.to_ascii_lowercase().contains("warp")
       || info.name.to_ascii_lowercase().contains("software")
       || info.name.to_ascii_lowercase().contains("llvmpipe")
+}
+
+fn describe_batch(batch_size: u32) -> String {
+    if batch_size >= 1_000_000 {
+        format!("{:.2}M", batch_size as f64 / 1_000_000.0)
+    } else if batch_size >= 1_000 {
+        format!("{:.0}K", batch_size as f64 / 1_000.0)
+    } else {
+        batch_size.to_string()
+    }
 }
 
 /// Enumerates available GPU devices using wgpu and OpenCL.
@@ -329,6 +384,13 @@ impl GpuMiner {
         };
 
         let adapter_info = adapter.get_info();
+        if is_wgpu_software_adapter(&adapter_info) {
+            return Err(format!(
+                "selected adapter '{}' is a software renderer; choose a hardware GPU or OpenCL device",
+                adapter_info.name
+            ));
+        }
+
         let device_name = adapter_info.name.clone();
 
         let (device, queue) = pollster::block_on(adapter.request_device(
@@ -460,6 +522,7 @@ impl GpuMiner {
         tail: &[u32; 3],
         nonce_start: u32,
         target: &[u32; 8],
+        dispatch_size: u32,
     ) -> Result<Vec<u32>, String> {
         // Write params into the pre-allocated buffer
         let mut params_data = [0u32; 20];
@@ -488,7 +551,7 @@ impl GpuMiner {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.dispatch_workgroups(self.batch_size / 256, 1, 1);
+            pass.dispatch_workgroups(dispatch_size / 256, 1, 1);
         }
 
         encoder.copy_buffer_to_buffer(&self.results_buffer, 0, &self.staging_buffer, 0, results_size as u64);
@@ -700,6 +763,7 @@ impl OpenClMiner {
         tail: &[u32; 3],
         nonce_start: u32,
         target: &[u32; 8],
+        dispatch_size: usize,
     ) -> Result<Vec<u32>, String> {
         // Build params data: 8 midstate + 3 tail + 1 nonce_start + 8 target = 20 u32s
         let mut params_data: [cl_uint; 20] = [0; 20];
@@ -742,7 +806,7 @@ impl OpenClMiner {
             ExecuteKernel::new(&self.kernel)
                 .set_arg(&self.params_buffer)
                 .set_arg(&self.results_buffer)
-                .set_global_work_size(self.batch_size)
+                .set_global_work_size(dispatch_size)
                 .set_local_work_size(256)
                 .enqueue_nd_range(&self.queue)
         };
@@ -798,10 +862,11 @@ impl GpuBackend {
         tail: &[u32; 3],
         nonce_start: u32,
         target: &[u32; 8],
+        dispatch_size: u32,
     ) -> Result<Vec<u32>, String> {
         match self {
-            GpuBackend::Wgpu(gpu) => gpu.mine_batch(midstate, tail, nonce_start, target),
-            GpuBackend::OpenCl(cl) => cl.mine_batch(midstate, tail, nonce_start, target),
+            GpuBackend::Wgpu(gpu) => gpu.mine_batch(midstate, tail, nonce_start, target, dispatch_size),
+            GpuBackend::OpenCl(cl) => cl.mine_batch(midstate, tail, nonce_start, target, dispatch_size as usize),
         }
     }
 
@@ -910,13 +975,18 @@ pub(crate) fn gpu_hash_loop(
 ) {
     let mut gpu = match create_gpu_backend(gpu_device_id.as_deref(), gpu_intensity_percent) {
         Ok(gpu) => {
+            let backend = gpu.backend_label();
+            let device_name = gpu.device_name().to_owned();
+            let batch_size = gpu.batch_size();
+            shared.set_gpu_runtime(backend, device_name.clone());
+            shared.set_gpu_dispatch_stats(batch_size as u64, 0, 0);
             log_message(
                 &app,
                 &format!(
                     "GPU miner initialized [{}]: {} (batch_size={})",
-                    gpu.backend_label(),
-                    gpu.device_name(),
-                    gpu.batch_size()
+                    backend,
+                    device_name,
+                    batch_size
                 ),
             );
             gpu
@@ -926,6 +996,7 @@ pub(crate) fn gpu_hash_loop(
             return;
         }
     };
+    let mut last_gpu_diagnostic = Instant::now();
 
     while !shared.stop.load(Ordering::Acquire) {
         let Some(job) = shared.job.read().unwrap().clone() else {
@@ -968,9 +1039,9 @@ pub(crate) fn gpu_hash_loop(
             // on slow GPUs, we start conservative and dynamically adjust to
             // keep each dispatch in the 200-500ms sweet spot.
             let mut nonce_start = 0u32;
-            let max_batch = gpu.batch_size();          // upper bound from intensity
-            let min_batch: u32 = 256 * 64;             // 16K — minimum useful work
-            let mut adaptive_batch = min_batch.max(max_batch / 16); // start at ~1/16 of max
+            let max_batch = normalize_dispatch_size(gpu.batch_size(), gpu.batch_size());
+            let min_batch = min_dispatch_size(max_batch);
+            let mut adaptive_batch = initial_dispatch_size(max_batch);
 
             loop {
                 if shared.stop.load(Ordering::Acquire)
@@ -980,7 +1051,8 @@ pub(crate) fn gpu_hash_loop(
                 }
 
                 let dispatch_start = Instant::now();
-                let found_nonces = match gpu.mine_batch(&midstate, &tail, nonce_start, &target) {
+                let dispatch_size = adaptive_batch;
+                let found_nonces = match gpu.mine_batch(&midstate, &tail, nonce_start, &target, dispatch_size) {
                     Ok(nonces) => nonces,
                     Err(err) => {
                         log_message(
@@ -990,9 +1062,20 @@ pub(crate) fn gpu_hash_loop(
                         std::thread::sleep(Duration::from_secs(3));
                         match create_gpu_backend(gpu_device_id.as_deref(), gpu_intensity_percent) {
                             Ok(new_gpu) => {
+                                let backend = new_gpu.backend_label();
+                                let device_name = new_gpu.device_name().to_owned();
+                                let batch_size = new_gpu.batch_size();
+                                shared.set_gpu_runtime(backend, device_name.clone());
+                                shared.set_gpu_dispatch_stats(batch_size as u64, 0, 0);
                                 gpu = new_gpu;
-                                adaptive_batch = min_batch; // reset to conservative
-                                log_message(&app, "GPU re-initialized successfully. Resuming mining.");
+                                adaptive_batch = initial_dispatch_size(batch_size);
+                                log_message(
+                                    &app,
+                                    &format!(
+                                        "GPU re-initialized [{}]: {} (batch_size={})",
+                                        backend, device_name, batch_size
+                                    ),
+                                );
                                 continue; // retry this batch
                             }
                             Err(reinit_err) => {
@@ -1003,11 +1086,30 @@ pub(crate) fn gpu_hash_loop(
                     }
                 };
                 let dispatch_ms = dispatch_start.elapsed().as_millis() as u64;
+                let throttle_sleep = gpu_throttle_sleep_duration(gpu_intensity_percent, dispatch_ms);
+                let throttle_ms = throttle_sleep.as_millis() as u64;
+                shared.set_gpu_dispatch_stats(dispatch_size as u64, dispatch_ms, throttle_ms);
+
+                if last_gpu_diagnostic.elapsed() >= Duration::from_secs(30) {
+                    log_message(
+                        &app,
+                        &format!(
+                            "GPU perf [{}]: device={}, dispatch={}, latency={}ms, throttle={}ms, intensity={}%",
+                            gpu.backend_label(),
+                            gpu.device_name(),
+                            describe_batch(dispatch_size),
+                            dispatch_ms,
+                            throttle_ms,
+                            gpu_intensity_percent.clamp(1, 100)
+                        ),
+                    );
+                    last_gpu_diagnostic = Instant::now();
+                }
 
                 // Track hash count
                 shared
                     .hashes
-                    .fetch_add(adaptive_batch as u64, Ordering::Relaxed);
+                    .fetch_add(dispatch_size as u64, Ordering::Relaxed);
 
                 // Adaptive batch sizing: target 200-500ms per dispatch.
                 // - Under 100ms → double (GPU can handle more)
@@ -1019,7 +1121,7 @@ pub(crate) fn gpu_hash_loop(
                     adaptive_batch = (adaptive_batch / 2).max(min_batch);
                 }
                 // Round to workgroup size
-                adaptive_batch = (adaptive_batch + 255) & !255;
+                adaptive_batch = normalize_dispatch_size(adaptive_batch, max_batch);
 
                 // Verify each found nonce on the CPU
                 for &nonce in &found_nonces {
@@ -1070,16 +1172,15 @@ pub(crate) fn gpu_hash_loop(
                 }
 
                 // Advance nonce_start; wrap on overflow means we've exhausted the space
-                let next_nonce = match nonce_start.checked_add(adaptive_batch) {
+                let next_nonce = match nonce_start.checked_add(dispatch_size) {
                     Some(next) => next,
                     None => break, // exhausted nonce space
                 };
                 nonce_start = next_nonce;
 
-                // Yield briefly when dispatches are very fast to prevent GPU
-                // monopolization.  When dispatches are >= 100ms, the GPU driver
-                // already had time to service display requests.
-                if dispatch_ms < 100 {
+                if !throttle_sleep.is_zero() {
+                    sleep_until_stopped(&shared.stop, throttle_sleep);
+                } else if dispatch_ms < 100 {
                     std::thread::sleep(Duration::from_millis(1));
                 }
             }
@@ -1129,11 +1230,16 @@ pub(crate) fn run_gpu_benchmark(
     let start = Instant::now();
     let mut total_hashes = 0u64;
     let mut nonce_start = 0u32;
+    let max_batch = normalize_dispatch_size(gpu.batch_size(), gpu.batch_size());
+    let min_batch = min_dispatch_size(max_batch);
+    let mut adaptive_batch = initial_dispatch_size(max_batch);
 
     while start.elapsed() < benchmark_duration {
+        let dispatch_start = Instant::now();
+        let dispatch_size = adaptive_batch;
         // Use catch_unwind to survive driver crashes from old/buggy GPU drivers
         let batch_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            gpu.mine_batch(&midstate, &tail, nonce_start, &target)
+            gpu.mine_batch(&midstate, &tail, nonce_start, &target, dispatch_size)
         }));
 
         match batch_result {
@@ -1146,11 +1252,20 @@ pub(crate) fn run_gpu_benchmark(
             }
         }
 
-        total_hashes += gpu.batch_size() as u64;
-        match nonce_start.checked_add(gpu.batch_size()) {
+        total_hashes += dispatch_size as u64;
+
+        match nonce_start.checked_add(dispatch_size) {
             Some(next) => nonce_start = next,
             None => break,
         }
+
+        let dispatch_ms = dispatch_start.elapsed().as_millis() as u64;
+        if dispatch_ms < 100 {
+            adaptive_batch = (adaptive_batch.saturating_mul(2)).min(max_batch);
+        } else if dispatch_ms > 800 {
+            adaptive_batch = (adaptive_batch / 2).max(min_batch);
+        }
+        adaptive_batch = normalize_dispatch_size(adaptive_batch, max_batch);
     }
 
     let elapsed = start.elapsed();
@@ -1174,6 +1289,10 @@ pub(crate) fn run_gpu_benchmark(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_gpu_hardware_tests() -> bool {
+        std::env::var_os("BTC_LOTTERY_PET_RUN_GPU_HARDWARE_TESTS").is_some()
+    }
 
     #[test]
     fn sha256_midstate_matches_known_vector() {
@@ -1206,7 +1325,28 @@ mod tests {
     }
 
     #[test]
+    fn difficulty_to_target_public_pool_low_diff_is_not_max() {
+        let target = difficulty_to_target_words(1e-5);
+
+        assert_ne!(target, [0xFFFFFFFF; 8]);
+        assert!(target[0] > 0);
+        assert!(target[2..].iter().all(|word| *word == 0));
+    }
+
+    #[test]
+    fn gpu_throttle_sleep_tracks_intensity_duty_cycle() {
+        assert_eq!(gpu_throttle_sleep_duration(100, 250), Duration::ZERO);
+        assert_eq!(gpu_throttle_sleep_duration(50, 250), Duration::from_millis(250));
+        assert_eq!(gpu_throttle_sleep_duration(10, 100), Duration::from_millis(900));
+    }
+
+    #[test]
     fn gpu_device_enumeration_includes_auto() {
+        if !run_gpu_hardware_tests() {
+            eprintln!("skipping hardware GPU enumeration test");
+            return;
+        }
+
         let devices = enumerate_gpu_devices();
         assert!(!devices.is_empty());
         assert_eq!(devices[0].id, "auto");
@@ -1215,6 +1355,11 @@ mod tests {
 
     #[test]
     fn opencl_device_enumeration_works() {
+        if !run_gpu_hardware_tests() {
+            eprintln!("skipping OpenCL hardware enumeration test");
+            return;
+        }
+
         // This should not crash even if no OpenCL devices are available.
         // On systems with OpenCL, it will list GPU devices; on systems
         // without, it will return an empty vec or an error.

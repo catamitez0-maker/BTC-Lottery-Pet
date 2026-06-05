@@ -540,6 +540,10 @@ mod tests {
     use super::{get_system_info, AppConfig, ComputeMode, PerformancePreset};
     use crate::gpu_miner;
 
+    fn run_gpu_hardware_tests() -> bool {
+        std::env::var_os("BTC_LOTTERY_PET_RUN_GPU_HARDWARE_TESTS").is_some()
+    }
+
     #[test]
     fn normalizes_saved_config_to_safe_startup_values() {
         let config = AppConfig {
@@ -621,6 +625,11 @@ mod tests {
 
     #[test]
     fn gpu_benchmark_returns_a_result() {
+        if !run_gpu_hardware_tests() {
+            eprintln!("skipping hardware GPU backend smoke test");
+            return;
+        }
+
         // Call the underlying sync functions directly (the Tauri commands are async wrappers)
         let devices = gpu_miner::enumerate_gpu_devices();
 

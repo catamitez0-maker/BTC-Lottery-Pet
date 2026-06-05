@@ -694,6 +694,7 @@ h2 {
 
 .settings-panel {
   max-height: 100%;
+  overscroll-behavior: contain;
   overflow-y: auto;
   padding: 10px;
   scrollbar-width: thin;
@@ -757,6 +758,10 @@ select {
   margin-top: 2px;
 }
 
+.compute-status .field-hint {
+  margin-top: 3px;
+}
+
 .benchmark-row {
   align-items: flex-start;
   display: flex;
@@ -802,10 +807,21 @@ select {
 .settings-panel .panel-actions {
   background: linear-gradient(180deg, rgba(24, 27, 34, 0.86), #181b22 32%);
   border-top: 1px solid rgba(255, 255, 255, 0.06);
-  bottom: -10px;
+  bottom: 0;
   margin: 6px -10px -10px;
   padding: 7px 10px 9px;
   position: sticky;
+  z-index: 2;
+}
+
+.field-hint {
+  color: #9fa8b5;
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.35;
+  margin: 4px 0 0;
+  text-transform: none;
 }
 
 .field-hint.warning {
