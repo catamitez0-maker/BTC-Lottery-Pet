@@ -1115,16 +1115,19 @@ function App() {
     config.cpu_threads,
     config.gpu_enabled && config.compute_mode === "gpu_real_experimental",
   );
+
+  const modeLabel = realModeEnabled
+    ? config.compute_mode === "gpu_real_experimental"
+      ? (effectiveCpuThreads > 0 ? "GPU + CPU" : "GPU")
+      : "CPU"
+    : gpuSimEnabled ? "GPU Simulation" : "CPU Simulation";
+
   const resourceMetrics = [
     ["PRESET", performancePresetLabel(config.performance_preset)],
     ["CPU THREADS", `${effectiveCpuThreads}`],
     ["RECOMMENDED", `${systemInfo.recommended_cpu_threads}`],
-    ["REAL MINING", config.gpu_enabled && config.compute_mode === "gpu_real_experimental"
-      ? (effectiveCpuThreads > 0 ? "CPU + GPU" : "GPU only")
-      : config.compute_mode === "cpu" ? "CPU only" : "Sim/Benchmark"],
-    ["GPU", config.compute_mode === "gpu_real_experimental"
-      ? "Real GPU"
-      : config.compute_mode === "gpu_sim" ? "Sim" : config.compute_mode === "gpu_benchmark" ? "Benchmark" : "Disabled"],
+    ["MODE", modeLabel],
+    ...(config.compute_mode !== "cpu" ? [["GPU INTENSITY", `${config.gpu_intensity_percent}%`]] : []),
   ];
   const metrics = [
     ["HASHRATE", displayedHashrate],
@@ -1133,24 +1136,17 @@ function App() {
     ["SHARES A / R", sharesValue],
     ["APP UPTIME", formatUptime(appUptime)],
     ["MINING UPTIME", formatUptime(miningUptime)],
-    ...(gpuSimEnabled
-      ? [
-          ["GPU", "SIM"],
-          ["GPU HASHRATE", displayedHashrate],
-          ["GPU INTENSITY", `${config.gpu_intensity_percent}%`],
-        ]
-      : []),
   ];
 
-  const isGpuRealMode = config.compute_mode === "gpu_real_experimental";
+  const isDraftGpuMode = draftConfig.compute_mode === "gpu_real_experimental";
   const cpuThreadOptions = useMemo(() => {
     const available = Math.max(1, systemInfo.available_parallelism);
     const rec = systemInfo.recommended_cpu_threads;
-    const base = isGpuRealMode ? [0, 1, 2, rec, 4, available] : [1, 2, rec, 4, available];
+    const base = isDraftGpuMode ? [0, 1, 2, rec, 4, available] : [1, 2, rec, 4, available];
     return Array.from(new Set(base))
       .filter((threads) => threads <= available)
       .sort((left, right) => left - right);
-  }, [systemInfo.available_parallelism, systemInfo.recommended_cpu_threads, isGpuRealMode]);
+  }, [systemInfo.available_parallelism, systemInfo.recommended_cpu_threads, isDraftGpuMode]);
 
   return (
     <main className={`pet-shell ${displayMode} ${petStatus === "Lucky Flash" || petStatus === "Jackpot" ? "lucky" : ""}`}>
@@ -1316,8 +1312,8 @@ function App() {
         {realModeEnabled
           ? config.compute_mode === "gpu_real_experimental"
             ? (effectiveCpuThreads > 0 ? "GPU + CPU real mining" : "GPU real mining")
-            : "Explicit CPU mode"
-          : gpuSimEnabled ? "Local GPU simulation" : "Local-only simulation"}
+            : "CPU real mining"
+          : gpuSimEnabled ? "GPU simulation" : "CPU simulation"}
         <button
           className="settings-button"
           disabled={isMining}
@@ -1326,7 +1322,7 @@ function App() {
         >
           SETTINGS
         </button>
-        <span className="cpu">{config.cpu_threads} thread{config.cpu_threads === 1 ? "" : "s"}</span>
+        <span className="cpu">{effectiveCpuThreads} thread{effectiveCpuThreads === 1 ? "" : "s"}</span>
       </footer>
 
       {errorMessage && <p className="error-banner">{errorMessage}</p>}
@@ -1337,8 +1333,8 @@ function App() {
             <p className="eyebrow">EXPLICIT OPT-IN</p>
             <h2>Enable real mining?</h2>
             <p>
-              Real mining mode will use your {config.compute_mode === "gpu_real_experimental" ? "GPU and CPU" : "CPU"}. This is for education and lottery-style solo
-              mining only.
+              Real mining mode will connect to a mining pool and use your {config.compute_mode === "gpu_real_experimental" ? "GPU" : "CPU"} to mine Bitcoin.
+              This is for education and lottery-style solo mining only.
             </p>
             <div className="panel-actions">
               <button className="secondary-button" onClick={() => setShowWarning(false)} type="button">
@@ -1482,84 +1478,88 @@ function App() {
                   value={draftConfig.compute_mode}
                   onChange={(event) => {
                     const computeMode = event.target.value as ComputeMode;
+                    const isGpu = computeMode === "gpu_sim" || computeMode === "gpu_benchmark" || computeMode === "gpu_real_experimental";
                     setDraftConfig({
                       ...draftConfig,
                       compute_mode: computeMode,
-                      gpu_enabled:
-                        computeMode === "gpu_sim" ||
-                        computeMode === "gpu_benchmark" ||
+                      gpu_enabled: isGpu,
+                      gpu_device_id: isGpu ? (draftConfig.gpu_device_id || "auto") : null,
+                      performance_preset: draftConfig.performance_preset,
+                      cpu_threads: threadsForPreset(
+                        draftConfig.performance_preset,
+                        systemInfo,
+                        Number(draftConfig.cpu_threads),
                         computeMode === "gpu_real_experimental",
-                      gpu_device_id: computeMode === "cpu" ? null : draftConfig.gpu_device_id,
+                      ),
                     });
                   }}
                 >
-                  <option value="cpu">CPU</option>
-                  <option value="gpu_sim">GPU Sim</option>
+                  <option value="cpu">CPU Only</option>
+                  <option value="gpu_sim">Simulation (GPU)</option>
                   <option value="gpu_benchmark">GPU Benchmark</option>
-                  <option value="gpu_real_experimental">
-                    GPU Real Mining
-                  </option>
+                  <option value="gpu_real_experimental">GPU Mining (Real)</option>
                 </select>
               </label>
-              <label>
-                GPU DEVICE
-                <select
-                  disabled={draftConfig.compute_mode === "cpu"}
-                  value={draftConfig.gpu_device_id || "auto"}
-                  onChange={(event) =>
-                    setDraftConfig({
-                      ...draftConfig,
-                      gpu_device_id: event.target.value === "auto" ? null : event.target.value,
-                    })
-                  }
-                >
-                  {gpuDevices.map((device) => (
-                    <option key={device.id} value={device.id}>
-                      {device.name}
-                    </option>
-                  ))}
-                </select>
-                {draftConfig.compute_mode !== "cpu" && gpuDevices.length <= 1 && (
-                  <p className="field-hint warning">
-                    ⚠ No compatible GPU detected. Your GPU may not support DX12/Vulkan/OpenCL.
-                    Try updating your GPU drivers.
-                  </p>
-                )}
-                {draftConfig.compute_mode !== "cpu" && gpuDevices.some((d) => d.simulated && d.id !== "auto") && (
-                  <p className="field-hint warning">
-                    ⚠ Only software GPU (WARP) found — slower than CPU mining.
-                  </p>
-                )}
-              </label>
-              <label>
-                GPU INTENSITY
-                <select
-                  disabled={draftConfig.compute_mode === "cpu"}
-                  value={draftConfig.gpu_intensity_percent}
-                  onChange={(event) =>
-                    setDraftConfig({
-                      ...draftConfig,
-                      gpu_intensity_percent: Number(event.target.value),
-                    })
-                  }
-                >
-                  {[10, 25, 50, 75, 100].map((intensity) => (
-                    <option key={intensity} value={intensity}>
-                      {intensity}%
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="compute-status" aria-label="GPU status">
-                <span>GPU</span>
+              {draftConfig.compute_mode !== "cpu" && (
+                <>
+                  <label>
+                    GPU DEVICE
+                    <select
+                      value={draftConfig.gpu_device_id || "auto"}
+                      onChange={(event) =>
+                        setDraftConfig({
+                          ...draftConfig,
+                          gpu_device_id: event.target.value === "auto" ? null : event.target.value,
+                        })
+                      }
+                    >
+                      {gpuDevices.map((device) => (
+                        <option key={device.id} value={device.id}>
+                          {device.name}
+                        </option>
+                      ))}
+                    </select>
+                    {gpuDevices.length <= 1 && (
+                      <p className="field-hint warning">
+                        ⚠ No compatible GPU detected. Try updating your GPU drivers.
+                      </p>
+                    )}
+                    {gpuDevices.some((d) => d.simulated && d.id !== "auto") && (
+                      <p className="field-hint warning">
+                        ⚠ Only software GPU (WARP) found — slower than CPU mining.
+                      </p>
+                    )}
+                  </label>
+                  <label>
+                    GPU INTENSITY
+                    <select
+                      value={draftConfig.gpu_intensity_percent}
+                      onChange={(event) =>
+                        setDraftConfig({
+                          ...draftConfig,
+                          gpu_intensity_percent: Number(event.target.value),
+                        })
+                      }
+                    >
+                      {[10, 25, 50, 75, 100].map((intensity) => (
+                        <option key={intensity} value={intensity}>
+                          {intensity}%
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </>
+              )}
+              <div className="compute-status" aria-label="Compute status">
+                <span>MODE</span>
                 <strong>
-                  {draftConfig.compute_mode === "gpu_sim"
-                    ? "SIM ENABLED"
-                    : draftConfig.compute_mode === "gpu_benchmark"
-                      ? "BENCHMARK ENABLED"
-                      : draftConfig.compute_mode === "gpu_real_experimental"
-                        ? "REAL GPU ENABLED"
-                        : "DISABLED"}
+                  {draftConfig.compute_mode === "cpu"
+                    ? "CPU ONLY"
+                    : draftConfig.compute_mode === "gpu_sim"
+                      ? "GPU SIMULATION"
+                      : draftConfig.compute_mode === "gpu_benchmark"
+                        ? "GPU BENCHMARK"
+                        : "GPU REAL MINING"}
                 </strong>
               </div>
               <label>
@@ -1675,7 +1675,7 @@ function App() {
             <div className="benchmark-row">
               <button
                 className="secondary-button"
-                disabled={draftConfig.compute_mode !== "gpu_benchmark"}
+                disabled={draftConfig.compute_mode === "cpu"}
                 onClick={() => void runGpuBenchmark()}
                 type="button"
               >
@@ -1686,10 +1686,6 @@ function App() {
                   <div>
                     <span>Device</span>
                     <strong>{benchmarkResult.device_name}</strong>
-                  </div>
-                  <div>
-                    <span>Mode</span>
-                    <strong>{benchmarkResult.simulated ? "GPU Benchmark (simulated)" : "GPU Benchmark"}</strong>
                   </div>
                   <div>
                     <span>Hashrate</span>
@@ -1704,7 +1700,7 @@ function App() {
               )}
             </div>
             <div className="panel-actions">
-              <span>Real CPU mining always starts manually.</span>
+              <span>Real mining requires the REAL mode toggle.</span>
               <button className="confirm-button" onClick={saveSettings} type="button">
                 SAVE
               </button>

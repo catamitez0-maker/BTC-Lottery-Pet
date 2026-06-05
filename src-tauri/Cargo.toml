@@ -1,6 +1,6 @@
 [package]
 name = "btc-lottery-pet"
-version = "0.6.3"
+version = "0.6.4"
 description = "An opt-in BTC lottery miner and simulation desktop pet"
 authors = ["BTC Lottery Pet"]
 edition = "2021"
