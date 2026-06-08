@@ -181,7 +181,7 @@ __kernel void sha256_mine(
     if (is_valid) {
         uint slot = atomic_inc(&results[0]);
         if (slot < 256u) {
-            results[1u + slot] = nonce;
+            atomic_xchg(&results[1u + slot], nonce);
         }
     }
 }

@@ -137,7 +137,6 @@ The repository-level [`config.json`](./config.json) contains defaults:
   "pool_host": "public-pool.io",
   "pool_port": 21496,
   "worker_name": "btc-lottery-pet",
-  "cpu_limit_percent": 10,
   "cpu_threads": 1,
   "performance_preset": "eco",
   "real_mining_enabled": false,
@@ -158,8 +157,7 @@ The repository-level [`config.json`](./config.json) contains defaults:
 On first launch, the Rust backend copies these values to the app-specific
 configuration directory. Existing Phase 1 config files are normalized when
 loaded. `performance_preset` and `cpu_threads` are the enforced real-mining CPU
-limits. The default `eco` preset uses one CPU thread. The older
-`cpu_limit_percent` field remains reserved for future fine-grained throttling.
+limits. The default `eco` preset uses one CPU thread.
 
 Upgrades preserve an existing saved pool selection. If you previously ran the
 app with the older `pool.nerdminers.org` default, review the settings panel and
@@ -218,8 +216,6 @@ Supported channels today:
 | --- | --- |
 | `Local Windows Toast` | Shows a local Windows notification-style balloon. Jackpot and connection warnings also play a short system sound. |
 | `Webhook` | Sends one-way JSON POST notifications for Jackpot and heartbeat events. |
-| `Telegram Bot` | Listed as `Coming Soon`; not enabled. |
-| `ntfy.sh` | Listed as `Coming Soon`; not enabled. |
 
 The Jackpot webhook body is intentionally narrow:
 
@@ -377,7 +373,7 @@ Its Rust outputs are written under `src-tauri\target-dev`.
 
 ## Release candidate checks
 
-For the v0.4 release candidate, verify:
+Before each release, verify:
 
 1. `cargo test --manifest-path src-tauri\Cargo.toml` passes, including the
    compact `nbits` target and block-candidate event tests.

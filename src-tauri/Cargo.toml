@@ -7,10 +7,15 @@ edition = "2021"
 
 [lib]
 name = "btc_lottery_pet_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["staticlib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
 
 [dependencies]
 bitcoin = "0.32"
@@ -24,3 +29,7 @@ tauri-plugin-single-instance = "2"
 wgpu = { version = "24", features = ["wgsl"] }
 pollster = "0.4"
 opencl3 = "0.12"
+ureq = { version = "2.9", features = ["json"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winrt-notification = "0.5"

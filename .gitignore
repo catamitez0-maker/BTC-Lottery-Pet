@@ -5,3 +5,9 @@ src-tauri/target-dev/
 *.log
 .idea/
 .vscode/
+.env*
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+*.swo

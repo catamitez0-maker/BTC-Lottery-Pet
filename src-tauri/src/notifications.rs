@@ -1,10 +1,4 @@
-use std::{
-    io::{Read, Write},
-    net::{TcpStream, ToSocketAddrs},
-    process::Command,
-    thread,
-    time::Duration,
-};
+use std::{thread, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -12,7 +6,6 @@ use tauri::AppHandle;
 
 use crate::miner;
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const WEBHOOK_WARNING: &str = "[Warning] Webhook notification failed; check notification settings.";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -20,8 +13,6 @@ const WEBHOOK_WARNING: &str = "[Warning] Webhook notification failed; check noti
 pub(crate) enum NotificationChannel {
     LocalWindowsToast,
     Webhook,
-    TelegramBot,
-    NtfySh,
 }
 
 impl Default for NotificationChannel {
@@ -216,22 +207,25 @@ fn heartbeat_actions(
             ),
             play_sound: false,
         }],
-        NotificationChannel::Webhook if !settings.webhook_url.trim().is_empty() => {
-            vec![NotificationAction::Webhook {
-                url: settings.webhook_url.trim().to_owned(),
-                body: json!({
-                    "event": "heartbeat",
-                    "status": snapshot.status,
-                    "hashrate": snapshot.hashrate,
-                    "accepted_shares": snapshot.accepted_shares,
-                    "rejected_shares": snapshot.rejected_shares,
-                    "best_difficulty": snapshot.best_difficulty,
-                    "uptime": snapshot.uptime,
-                    "pool": snapshot.pool
-                }),
-            }]
+        NotificationChannel::Webhook => {
+            if !settings.webhook_url.trim().is_empty() {
+                vec![NotificationAction::Webhook {
+                    url: settings.webhook_url.trim().to_owned(),
+                    body: json!({
+                        "event": "heartbeat",
+                        "status": snapshot.status,
+                        "hashrate": snapshot.hashrate,
+                        "accepted_shares": snapshot.accepted_shares,
+                        "rejected_shares": snapshot.rejected_shares,
+                        "best_difficulty": snapshot.best_difficulty,
+                        "uptime": snapshot.uptime,
+                        "pool": snapshot.pool
+                    }),
+                }]
+            } else {
+                Vec::new()
+            }
         }
-        _ => Vec::new(),
     }
 }
 
@@ -262,25 +256,17 @@ fn run_actions(app: &AppHandle, actions: Vec<NotificationAction>) {
 fn show_local_notification(title: &str, body: &str, play_sound: bool) -> Result<(), String> {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-
-        let sound_script = if play_sound {
-            "[System.Media.SystemSounds]::Exclamation.Play();"
+        use winrt_notification::{Sound, Toast};
+        let mut toast = Toast::new("com.btc-lottery-pet.desktop")
+            .title(title)
+            .text1(body);
+        if play_sound {
+            toast = toast.sound(Some(Sound::SMS));
         } else {
-            ""
-        };
-        let script = format!(
-            "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; {sound_script} $n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon = [System.Drawing.SystemIcons]::Information; $n.BalloonTipTitle = '{}'; $n.BalloonTipText = '{}'; $n.Visible = $true; $n.ShowBalloonTip(5000); Start-Sleep -Milliseconds 5500; $n.Dispose();",
-            ps_single_quote(title),
-            ps_single_quote(body)
-        );
-
-        Command::new("powershell.exe")
-            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| format!("failed to show local notification: {error}"))
+            toast = toast.sound(None);
+        }
+        toast.show().map_err(|error| format!("failed to show local notification: {:?}", error))?;
+        Ok(())
     }
 
     #[cfg(not(windows))]
@@ -291,143 +277,16 @@ fn show_local_notification(title: &str, body: &str, play_sound: bool) -> Result<
 }
 
 fn post_json(url: &str, body: &Value) -> Result<(), String> {
-    if url.starts_with("http://") {
-        return post_json_http(url, body);
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("webhook URL must start with http:// or https://".into());
     }
 
-    if url.starts_with("https://") {
-        return post_json_powershell(url, body);
-    }
+    ureq::post(url)
+        .timeout(Duration::from_secs(5))
+        .send_json(body)
+        .map_err(|error| format!("failed to execute webhook request: {error}"))?;
 
-    Err("webhook URL must start with http:// or https://".into())
-}
-
-fn post_json_http(url: &str, body: &Value) -> Result<(), String> {
-    let target = parse_http_url(url)?;
-    let address = format!("{}:{}", target.host, target.port);
-    let mut socket_addresses = address
-        .to_socket_addrs()
-        .map_err(|error| format!("failed to resolve webhook host: {error}"))?;
-    let socket_address = socket_addresses
-        .next()
-        .ok_or_else(|| "failed to resolve webhook host".to_string())?;
-    let mut stream = TcpStream::connect_timeout(&socket_address, Duration::from_secs(5))
-        .map_err(|error| format!("failed to connect to webhook: {error}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|error| format!("failed to set webhook read timeout: {error}"))?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .map_err(|error| format!("failed to set webhook write timeout: {error}"))?;
-
-    let body_text = serde_json::to_string(body)
-        .map_err(|error| format!("failed to encode webhook: {error}"))?;
-    let request = format!(
-        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        target.path,
-        target.host_header,
-        body_text.as_bytes().len(),
-        body_text
-    );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|error| format!("failed to write webhook request: {error}"))?;
-
-    let mut response = [0_u8; 512];
-    let bytes_read = stream
-        .read(&mut response)
-        .map_err(|error| format!("failed to read webhook response: {error}"))?;
-    let response_text = String::from_utf8_lossy(&response[..bytes_read]);
-    let status = response_text
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| "webhook returned an invalid response".to_string())?;
-
-    if (200..300).contains(&status) {
-        Ok(())
-    } else {
-        Err("webhook returned a non-success status".into())
-    }
-}
-
-fn post_json_powershell(url: &str, body: &Value) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-
-        let body_text = serde_json::to_string(body)
-            .map_err(|error| format!("failed to encode webhook: {error}"))?;
-        let script = format!(
-            "Invoke-RestMethod -Uri '{}' -Method Post -ContentType 'application/json' -Body '{}'",
-            ps_single_quote(url),
-            ps_single_quote(&body_text)
-        );
-        let status = Command::new("powershell.exe")
-            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
-            .creation_flags(CREATE_NO_WINDOW)
-            .status()
-            .map_err(|error| format!("failed to execute webhook request: {error}"))?;
-
-        if status.success() {
-            Ok(())
-        } else {
-            Err("webhook command returned a non-success status".into())
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        let _ = (url, body);
-        Err("https webhook delivery is only supported on Windows in this build".into())
-    }
-}
-
-struct HttpTarget {
-    host: String,
-    host_header: String,
-    port: u16,
-    path: String,
-}
-
-fn parse_http_url(url: &str) -> Result<HttpTarget, String> {
-    let without_scheme = url
-        .strip_prefix("http://")
-        .ok_or_else(|| "webhook URL must start with http://".to_string())?;
-    let (authority, path) = without_scheme
-        .split_once('/')
-        .map(|(authority, path)| (authority, format!("/{path}")))
-        .unwrap_or((without_scheme, "/".into()));
-
-    if authority.is_empty() || authority.contains('@') {
-        return Err("webhook URL host is invalid".into());
-    }
-
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((host, port_text)) if !host.is_empty() => {
-            let port = port_text
-                .parse::<u16>()
-                .map_err(|_| "webhook URL port is invalid".to_string())?;
-            (host.to_owned(), port)
-        }
-        _ => (authority.to_owned(), 80),
-    };
-
-    Ok(HttpTarget {
-        host,
-        host_header: authority.to_owned(),
-        port,
-        path,
-    })
-}
-
-fn ps_single_quote(value: &str) -> String {
-    value
-        .replace('\'', "''")
-        .replace(['\r', '\n'], " ")
-        .replace('`', "``")
-        .replace('$', "`$")
+    Ok(())
 }
 
 #[cfg(test)]
@@ -436,12 +295,13 @@ mod tests {
         io::{Read, Write},
         net::TcpListener,
         thread,
+        time::Duration,
     };
 
     use serde_json::json;
 
     use super::{
-        connection_error_actions, heartbeat_actions, jackpot_actions, parse_http_url, post_json,
+        connection_error_actions, heartbeat_actions, jackpot_actions, post_json,
         share_accepted_actions, HeartbeatInterval, HeartbeatSnapshot, JackpotNotificationEvent,
         NotificationAction, NotificationChannel, NotificationSettings,
     };
@@ -543,23 +403,48 @@ mod tests {
     }
 
     #[test]
-    fn parses_local_http_webhook_url() {
-        let target = parse_http_url("http://127.0.0.1:8080/webhook").unwrap();
-
-        assert_eq!(target.host, "127.0.0.1");
-        assert_eq!(target.port, 8080);
-        assert_eq!(target.path, "/webhook");
-    }
-
-    #[test]
     fn posts_webhook_json_to_local_server() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 4096];
-            let bytes_read = stream.read(&mut request).unwrap();
-            let text = String::from_utf8_lossy(&request[..bytes_read]).to_string();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+
+            loop {
+                let bytes_read = stream.read(&mut buffer).unwrap_or(0);
+                if bytes_read == 0 {
+                    break;
+                }
+
+                request.extend_from_slice(&buffer[..bytes_read]);
+                let text = String::from_utf8_lossy(&request);
+                let Some(header_end) = text.find("\r\n\r\n") else {
+                    continue;
+                };
+
+                let headers = &text[..header_end];
+                let body_len = request.len().saturating_sub(header_end + 4);
+                let content_length = headers.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                });
+                let headers_lower = headers.to_ascii_lowercase();
+
+                if content_length.is_some_and(|length| body_len >= length)
+                    || (headers_lower.contains("transfer-encoding: chunked")
+                        && text.contains("\r\n0\r\n\r\n"))
+                {
+                    break;
+                }
+            }
+
+            let text = String::from_utf8_lossy(&request).to_string();
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                 .unwrap();

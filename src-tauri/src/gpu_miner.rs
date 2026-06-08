@@ -999,7 +999,7 @@ pub(crate) fn gpu_hash_loop(
     let mut last_gpu_diagnostic = Instant::now();
 
     while !shared.stop.load(Ordering::Acquire) {
-        let Some(job) = shared.job.read().unwrap().clone() else {
+        let Some(job) = shared.job.read().unwrap_or_else(|e| e.into_inner()).clone() else {
             std::thread::sleep(Duration::from_millis(25));
             continue;
         };
@@ -1050,8 +1050,12 @@ pub(crate) fn gpu_hash_loop(
                     break;
                 }
 
+                // Clamp dispatch_size to prevent GPU threads from overflowing u32 nonce space
+                let remaining = (u32::MAX - nonce_start).saturating_add(1);
+                let dispatch_size = adaptive_batch.min(remaining);
+                if dispatch_size == 0 { break; }
+
                 let dispatch_start = Instant::now();
-                let dispatch_size = adaptive_batch;
                 let found_nonces = match gpu.mine_batch(&midstate, &tail, nonce_start, &target, dispatch_size) {
                     Ok(nonces) => nonces,
                     Err(err) => {
@@ -1165,7 +1169,10 @@ pub(crate) fn gpu_hash_loop(
                         };
 
                         match share_sender.try_send(submission) {
-                            Ok(()) | Err(TrySendError::Full(_)) => {}
+                            Ok(()) => {}
+                            Err(TrySendError::Full(_)) => {
+                                eprintln!("[WARN] share queue full — share dropped");
+                            }
                             Err(TrySendError::Disconnected(_)) => return,
                         }
                     }

@@ -208,12 +208,12 @@ impl MiningController {
             .spawn(move || run_miner(worker_app, settings, worker_stop))
             .map_err(|error| format!("failed to start Stratum worker: {error}"))?;
 
-        *self.stop_signal.lock().unwrap() = Some(stop);
+        *self.stop_signal.lock().unwrap_or_else(|e| e.into_inner()) = Some(stop);
         Ok(())
     }
 
     pub fn stop(&self, app: &AppHandle) {
-        if let Some(stop) = self.stop_signal.lock().unwrap().take() {
+        if let Some(stop) = self.stop_signal.lock().unwrap_or_else(|e| e.into_inner()).take() {
             log_message(app, "Mining stop requested");
             stop.store(true, Ordering::Release);
         }
@@ -277,12 +277,12 @@ impl SharedMiningState {
     }
 
     pub(crate) fn set_connection_status(&self, status: impl Into<String>) {
-        *self.connection_status.lock().unwrap() = status.into();
+        *self.connection_status.lock().unwrap_or_else(|e| e.into_inner()) = status.into();
     }
 
     pub(crate) fn set_gpu_runtime(&self, backend: impl Into<String>, device_name: impl Into<String>) {
-        *self.gpu_backend.lock().unwrap() = backend.into();
-        *self.gpu_device_name.lock().unwrap() = device_name.into();
+        *self.gpu_backend.lock().unwrap_or_else(|e| e.into_inner()) = backend.into();
+        *self.gpu_device_name.lock().unwrap_or_else(|e| e.into_inner()) = device_name.into();
     }
 
     pub(crate) fn set_gpu_dispatch_stats(&self, dispatch_size: u64, dispatch_ms: u64, throttle_ms: u64) {
@@ -293,12 +293,12 @@ impl SharedMiningState {
 
     pub(crate) fn set_job(&self, mut job: JobTemplate) {
         job.generation = self.job_generation.fetch_add(1, Ordering::AcqRel) + 1;
-        *self.job.write().unwrap() = Some(job);
+        *self.job.write().unwrap_or_else(|e| e.into_inner()) = Some(job);
     }
 
     pub(crate) fn clear_job(&self) {
         self.job_generation.fetch_add(1, Ordering::AcqRel);
-        *self.job.write().unwrap() = None;
+        *self.job.write().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     pub(crate) fn update_best_difficulty(&self, difficulty: f64) {
@@ -321,7 +321,7 @@ impl SharedMiningState {
         let current_job_id = self
             .job
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map(|job| job.job_id.clone())
             .unwrap_or_default();
@@ -332,9 +332,9 @@ impl SharedMiningState {
             rejected_shares: self.rejected_shares.load(Ordering::Relaxed),
             best_difficulty: f64::from_bits(self.best_difficulty_bits.load(Ordering::Relaxed)),
             current_job_id,
-            connection_status: self.connection_status.lock().unwrap().clone(),
-            gpu_backend: self.gpu_backend.lock().unwrap().clone(),
-            gpu_device_name: self.gpu_device_name.lock().unwrap().clone(),
+            connection_status: self.connection_status.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            gpu_backend: self.gpu_backend.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            gpu_device_name: self.gpu_device_name.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             gpu_dispatch_size: self.gpu_dispatch_size.load(Ordering::Relaxed),
             gpu_dispatch_ms: self.gpu_dispatch_ms.load(Ordering::Relaxed),
             gpu_throttle_ms: self.gpu_throttle_ms.load(Ordering::Relaxed),
@@ -451,9 +451,14 @@ fn run_stratum_connection(
     let mut last_job_received = Instant::now();
     let mut debug_hint_logged = false;
     let mut smoothed_hashrate: f64 = 0.0;
+    let mut last_activity = Instant::now();
 
     while !shared.stop.load(Ordering::Acquire) {
-        let has_job = shared.job.read().unwrap().is_some();
+        if last_activity.elapsed() >= Duration::from_secs(300) {
+            return Err("no message received from pool for 5 minutes".into());
+        }
+
+        let has_job = shared.job.read().unwrap_or_else(|e| e.into_inner()).is_some();
         if has_job {
             last_job_received = Instant::now();
             debug_hint_logged = false;
@@ -506,6 +511,7 @@ fn run_stratum_connection(
         match read_stratum_line(&mut reader) {
             Ok(None) => return Err("pool closed the connection".into()),
             Ok(Some(line)) => {
+                last_activity = Instant::now();
                 handle_server_message(
                     app,
                     line.trim(),
@@ -793,21 +799,21 @@ fn spawn_hash_workers(
         let worker_app = app.clone();
         let worker_pool = pool.clone();
 
-        workers.push(
-            thread::Builder::new()
-                .name(format!("btc-lottery-hash-{worker_index}"))
-                .spawn(move || {
-                    hash_loop(
-                        worker_index,
-                        worker_count,
-                        shared,
-                        share_sender,
-                        worker_app,
-                        worker_pool,
-                    )
-                })
-                .expect("failed to start hash worker"),
-        );
+        match thread::Builder::new()
+            .name(format!("btc-lottery-hash-{worker_index}"))
+            .spawn(move || {
+                hash_loop(
+                    worker_index,
+                    worker_count,
+                    shared,
+                    share_sender,
+                    worker_app,
+                    worker_pool,
+                )
+            }) {
+            Ok(handle) => workers.push(handle),
+            Err(e) => eprintln!("[ERROR] failed to start hash worker: {e}"),
+        }
     }
 
     // Spawn GPU worker(s)
@@ -820,23 +826,23 @@ fn spawn_hash_workers(
         let gpu_intensity = settings.gpu_intensity_percent;
         let gpu_worker_index = settings.cpu_threads; // GPU gets the last index
 
-        workers.push(
-            thread::Builder::new()
-                .name("btc-lottery-gpu-0".into())
-                .spawn(move || {
-                    crate::gpu_miner::gpu_hash_loop(
-                        shared,
-                        share_sender,
-                        gpu_app,
-                        gpu_pool,
-                        gpu_device_id,
-                        gpu_intensity,
-                        gpu_worker_index,
-                        total_workers,
-                    )
-                })
-                .expect("failed to start GPU worker"),
-        );
+        match thread::Builder::new()
+            .name("btc-lottery-gpu-0".into())
+            .spawn(move || {
+                crate::gpu_miner::gpu_hash_loop(
+                    shared,
+                    share_sender,
+                    gpu_app,
+                    gpu_pool,
+                    gpu_device_id,
+                    gpu_intensity,
+                    gpu_worker_index,
+                    total_workers,
+                )
+            }) {
+            Ok(handle) => workers.push(handle),
+            Err(e) => eprintln!("[ERROR] failed to start GPU worker: {e}"),
+        }
     }
 
     workers
@@ -851,7 +857,7 @@ pub(crate) fn hash_loop(
     pool: String,
 ) {
     while !shared.stop.load(Ordering::Acquire) {
-        let Some(job) = shared.job.read().unwrap().clone() else {
+        let Some(job) = shared.job.read().unwrap_or_else(|e| e.into_inner()).clone() else {
             thread::sleep(Duration::from_millis(25));
             continue;
         };
@@ -868,6 +874,7 @@ pub(crate) fn hash_loop(
                 break;
             };
 
+            let mut completed_nonce_space = true;
             for nonce in 0..=u32::MAX {
                 if nonce & 0x3FF == 0 {
                     if nonce > 0 {
@@ -881,6 +888,7 @@ pub(crate) fn hash_loop(
                         if partial > 0 {
                             shared.hashes.fetch_add(partial as u64, Ordering::Relaxed);
                         }
+                        completed_nonce_space = false;
                         break;
                     }
                 }
@@ -898,6 +906,7 @@ pub(crate) fn hash_loop(
 
                 if difficulty >= job.share_difficulty {
                     if shared.stop.load(Ordering::Acquire) {
+                        completed_nonce_space = false;
                         break;
                     }
 
@@ -909,10 +918,21 @@ pub(crate) fn hash_loop(
                     };
 
                     match share_sender.try_send(submission) {
-                        Ok(()) | Err(TrySendError::Full(_)) => {}
+                        Ok(()) => {}
+                        Err(TrySendError::Full(_)) => {
+                            eprintln!("[WARN] share queue full — share dropped");
+                        }
                         Err(TrySendError::Disconnected(_)) => return,
                     }
                 }
+            }
+
+            // Count the final block only when the full nonce space was exhausted.
+            // The loop runs nonce 0..=u32::MAX. The fetch_add(1024) fires when
+            // nonce & 0x3FF == 0 and nonce > 0, so the last block of up to 1024
+            // nonces (including u32::MAX itself) is never counted.
+            if completed_nonce_space {
+                shared.hashes.fetch_add(1024, Ordering::Relaxed);
             }
 
             extranonce_counter = extranonce_counter.wrapping_add(worker_count as u64);

@@ -1,19 +1,23 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useState, useRef } from "react";
+import Header from "./components/Header";
+import PetDisplay from "./components/PetDisplay";
+import MetricsGrid from "./components/MetricsGrid";
+import SettingsPanel from "./components/SettingsPanel";
+import LogTicker from "./components/LogTicker";
 
-type PetStatus = "Sleeping" | "Connecting" | "Mining" | "Overdrive" | "Lucky Flash" | "Cooling Down" | "Connection Error" | "New Best Diff" | "Jackpot";
-type ComputeMode = "cpu" | "gpu" | "hybrid";
-type PerformancePreset = "eco" | "normal" | "turbo" | "custom";
-type HeartbeatInterval = "off" | "30min" | "1h" | "6h";
-type NotificationChannel = "local_windows_toast" | "webhook" | "telegram_bot" | "ntfy_sh";
+export type PetStatus = "Sleeping" | "Connecting" | "Mining" | "Overdrive" | "Lucky Flash" | "Cooling Down" | "Connection Error" | "New Best Diff" | "Jackpot";
+export type ComputeMode = "cpu" | "gpu" | "hybrid";
+export type PerformancePreset = "eco" | "normal" | "turbo" | "custom";
+export type HeartbeatInterval = "off" | "30min" | "1h" | "6h";
+export type NotificationChannel = "local_windows_toast" | "webhook";
 
-interface AppConfig {
+export interface AppConfig {
   btc_address: string;
   pool_host: string;
   pool_port: number;
   worker_name: string;
-  cpu_limit_percent: number;
   cpu_threads: number;
   performance_preset: PerformancePreset;
   real_mining_enabled: boolean;
@@ -30,19 +34,19 @@ interface AppConfig {
   gpu_intensity_percent: number;
 }
 
-interface SystemInfo {
+export interface SystemInfo {
   available_parallelism: number;
   default_cpu_threads: number;
   recommended_cpu_threads: number;
 }
 
-interface GpuDevice {
+export interface GpuDevice {
   id: string;
   name: string;
   simulated: boolean;
 }
 
-interface GpuBenchmarkResult {
+export interface GpuBenchmarkResult {
   device_id: string;
   device_name: string;
   simulated: boolean;
@@ -52,13 +56,13 @@ interface GpuBenchmarkResult {
   note: string;
 }
 
-interface SimulationStats {
+export interface SimulationStats {
   status: PetStatus;
   hashrate: number;
   bestDifficulty: number;
 }
 
-interface RealMiningStats {
+export interface RealMiningStats {
   hashrate: number;
   accepted_shares: number;
   rejected_shares: number;
@@ -72,7 +76,7 @@ interface RealMiningStats {
   gpu_throttle_ms: number;
 }
 
-interface BlockFoundEvent {
+export interface BlockFoundEvent {
   job_id: string;
   nonce: string;
   ntime: string;
@@ -88,7 +92,6 @@ const fallbackConfig: AppConfig = {
   pool_host: "public-pool.io",
   pool_port: 21496,
   worker_name: "btc-lottery-pet",
-  cpu_limit_percent: 10,
   cpu_threads: 1,
   performance_preset: "eco",
   real_mining_enabled: false,
@@ -136,7 +139,7 @@ function formatError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function presetPort(poolHost: string, currentPort: number) {
+export function presetPort(poolHost: string, currentPort: number) {
   if (poolHost === "public-pool.io") {
     return 21496;
   }
@@ -158,13 +161,13 @@ function formatUptime(seconds: number) {
     .join(":");
 }
 
-function formatDifficulty(value: number) {
+export function formatDifficulty(value: number) {
   return value < 1_000
     ? value.toFixed(4)
     : Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
 }
 
-function formatHashrate(hashrate: number) {
+export function formatHashrate(hashrate: number) {
   if (hashrate >= 1_000_000) {
     return `${(hashrate / 1_000_000).toFixed(2)} MH/s`;
   }
@@ -187,7 +190,7 @@ function formatDispatchSize(dispatchSize: number) {
   }).format(dispatchSize);
 }
 
-function threadsForPreset(
+export function threadsForPreset(
   preset: PerformancePreset,
   systemInfo: SystemInfo,
   customThreads: number,
@@ -215,19 +218,19 @@ function threadsForPreset(
   }
 }
 
-function isGpuComputeMode(mode: ComputeMode) {
+export function isGpuComputeMode(mode: ComputeMode) {
   return mode === "gpu" || mode === "hybrid";
 }
 
-function hasHardwareGpuDevice(devices: GpuDevice[]) {
+export function hasHardwareGpuDevice(devices: GpuDevice[]) {
   return devices.some((device) => device.id !== "auto" && !device.simulated);
 }
 
-function hasSoftwareGpuDevice(devices: GpuDevice[]) {
+export function hasSoftwareGpuDevice(devices: GpuDevice[]) {
   return devices.some((device) => device.id !== "auto" && device.simulated);
 }
 
-function sanitizeGpuDeviceId(deviceId: string | null, devices: GpuDevice[]) {
+export function sanitizeGpuDeviceId(deviceId: string | null, devices: GpuDevice[]) {
   if (!deviceId || deviceId === "auto") {
     return null;
   }
@@ -274,52 +277,10 @@ function heartbeatIntervalMs(interval: HeartbeatInterval) {
   }
 }
 
-function getPetExpression(status: PetStatus): string {
-  switch (status) {
-    case "Sleeping":
-      return "( -ω- )zzZ";
-    case "Connecting":
-      return "( ._.)";
-    case "Cooling Down":
-      return "( ~_~ )";
-    case "Connection Error":
-      return "( x_x )";
-    case "Jackpot":
-      return "( ₿∀₿ )";
-    case "Lucky Flash":
-      return "( ★∀★ )";
-    case "New Best Diff":
-      return "( ≧▽≦ )";
-    case "Overdrive":
-      return "( >_> )!";
-    case "Mining":
-      return "( •̀_•́ )";
-    default:
-      return "( •̀_•́ )";
-  }
-}
-
-function getSlotChar(status: PetStatus, index: number): string {
-  switch (status) {
-    case "Sleeping":
-      return ["Z", "z", "Z"][index];
-    case "Connecting":
-      return ["C", "N", "N"][index];
-    case "Cooling Down":
-      return ["C", "O", "L"][index];
-    case "Connection Error":
-      return ["E", "R", "R"][index];
-    case "Jackpot":
-      return ["₿", "₿", "₿"][index];
-    case "Lucky Flash":
-      return ["₿", "₿", "₿"][index];
-    case "New Best Diff":
-      return ["B", "S", "T"][index];
-    case "Overdrive":
-      return ["G", "P", "U"][index];
-    default:
-      return "-";
-  }
+function useLatestRef<T>(val: T) {
+  const ref = useRef(val);
+  ref.current = val;
+  return ref;
 }
 
 function App() {
@@ -331,8 +292,9 @@ function App() {
   const [draftConfig, setDraftConfig] = useState<AppConfig>(fallbackConfig);
   const [realModeEnabled, setRealModeEnabled] = useState(false);
   const [showWarning, setShowWarning] = useState(false);
+  const [showCpuWarning, setShowCpuWarning] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [errorMessage, setErrorMessage] = useState("");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [realStats, setRealStats] = useState<RealMiningStats>(idleRealStats);
   const [simulationStats, setSimulationStats] = useState<SimulationStats>({
     status: "Sleeping",
@@ -359,52 +321,16 @@ function App() {
   const coolingDownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const simShareTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const simLuckyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const configRef = useRef(config);
-  const realStatsRef = useRef(realStats);
-  const simulationStatsRef = useRef(simulationStats);
-  const appUptimeRef = useRef(appUptime);
-  const miningUptimeRef = useRef(miningUptime);
-  const simAcceptedRef = useRef(simAccepted);
-  const simRejectedRef = useRef(simRejected);
-  const realModeEnabledRef = useRef(realModeEnabled);
-  const isMiningRef = useRef(isMining);
+  const configRef = useLatestRef(config);
+  const realStatsRef = useLatestRef(realStats);
+  const simulationStatsRef = useLatestRef(simulationStats);
+  const appUptimeRef = useLatestRef(appUptime);
+  const miningUptimeRef = useLatestRef(miningUptime);
+  const simAcceptedRef = useLatestRef(simAccepted);
+  const simRejectedRef = useLatestRef(simRejected);
+  const realModeEnabledRef = useLatestRef(realModeEnabled);
+  const isMiningRef = useLatestRef(isMining);
   const lastConnectionNotificationRef = useRef(0);
-
-  useEffect(() => {
-    configRef.current = config;
-  }, [config]);
-
-  useEffect(() => {
-    realStatsRef.current = realStats;
-  }, [realStats]);
-
-  useEffect(() => {
-    simulationStatsRef.current = simulationStats;
-  }, [simulationStats]);
-
-  useEffect(() => {
-    appUptimeRef.current = appUptime;
-  }, [appUptime]);
-
-  useEffect(() => {
-    miningUptimeRef.current = miningUptime;
-  }, [miningUptime]);
-
-  useEffect(() => {
-    simAcceptedRef.current = simAccepted;
-  }, [simAccepted]);
-
-  useEffect(() => {
-    simRejectedRef.current = simRejected;
-  }, [simRejected]);
-
-  useEffect(() => {
-    realModeEnabledRef.current = realModeEnabled;
-  }, [realModeEnabled]);
-
-  useEffect(() => {
-    isMiningRef.current = isMining;
-  }, [isMining]);
 
   // Component unmount cleanup
   useEffect(() => {
@@ -752,7 +678,7 @@ function App() {
 
       const luckyFlash = Math.random() < 0.08;
       const candidateDifficulty = Math.random() * Math.random() * 4_500;
-      const intensityScale = config.gpu_intensity_percent / 10;
+
       const addedHashrate = 0.85 + Math.random() * 0.7;
 
       setSimulationStats((current) => ({
@@ -821,49 +747,7 @@ function App() {
     }
   }, [realStats.accepted_shares, isMining, realModeEnabled]);
 
-  const startMining = async () => {
-    setErrorMessage("");
-    setMiningUptime(0);
-    setIsCoolingDown(false);
-    setBlockFound(null);
-    setShowJackpot(false);
-    setLastShare("None");
-    if (coolingDownTimerRef.current) {
-      clearTimeout(coolingDownTimerRef.current);
-      coolingDownTimerRef.current = null;
-    }
-
-    if (!realModeEnabled) {
-      isMiningRef.current = true;
-      setIsMining(true);
-      setSimulationStats((current) => ({
-        ...current,
-        status: "Mining",
-      }));
-      return;
-    }
-
-    if (!config.btc_address) {
-      setErrorMessage("Add a BTC address before starting real mining.");
-      setShowSettings(true);
-      return;
-    }
-
-    const realCpuThreads = threadsForPreset(
-      config.performance_preset,
-      systemInfo,
-      config.cpu_threads,
-      config.compute_mode === "gpu",
-    );
-    const highCpuRequested =
-      realCpuThreads > 0 &&
-      (config.performance_preset === "turbo" ||
-        realCpuThreads > systemInfo.recommended_cpu_threads);
-
-    if (highCpuRequested && !window.confirm("High CPU usage may heat your computer. Continue?")) {
-      return;
-    }
-
+  const startRealMiningConfirmed = async (realCpuThreads: number) => {
     isMiningRef.current = true;
     setIsMining(true);
     prevAcceptedSharesRef.current = 0;
@@ -903,6 +787,64 @@ function App() {
     }
   };
 
+  const startMining = async () => {
+    setErrorMessage(null);
+    setMiningUptime(0);
+    setIsCoolingDown(false);
+    setLastShare("None");
+    if (coolingDownTimerRef.current) {
+      clearTimeout(coolingDownTimerRef.current);
+      coolingDownTimerRef.current = null;
+    }
+
+    if (!realModeEnabled) {
+      isMiningRef.current = true;
+      setIsMining(true);
+      setSimAccepted(0);
+      setSimRejected(0);
+      setSimulationStats((current) => ({
+        ...current,
+        status: "Mining",
+      }));
+      return;
+    }
+
+    if (!config.btc_address) {
+      setErrorMessage("Add a BTC address before starting real mining.");
+      setShowSettings(true);
+      return;
+    }
+
+    const realCpuThreads = threadsForPreset(
+      config.performance_preset,
+      systemInfo,
+      config.cpu_threads,
+      config.compute_mode === "gpu",
+    );
+    const highCpuRequested =
+      realCpuThreads > 0 &&
+      (config.performance_preset === "turbo" ||
+        realCpuThreads > systemInfo.recommended_cpu_threads);
+
+    if (highCpuRequested) {
+      setShowCpuWarning(true);
+      return;
+    }
+
+    await startRealMiningConfirmed(realCpuThreads);
+  };
+
+  const confirmCpuWarning = async () => {
+    setShowCpuWarning(false);
+    const realCpuThreads = threadsForPreset(
+      config.performance_preset,
+      systemInfo,
+      config.cpu_threads,
+      config.compute_mode === "gpu",
+    );
+    await startRealMiningConfirmed(realCpuThreads);
+  };
+
   const stopMining = async () => {
     isMiningRef.current = false;
     setIsMining(false);
@@ -919,8 +861,6 @@ function App() {
     }
     setIsLucky(false);
     setIsNewBest(false);
-    setBlockFound(null);
-    setShowJackpot(false);
 
     if (coolingDownTimerRef.current) {
       clearTimeout(coolingDownTimerRef.current);
@@ -960,7 +900,7 @@ function App() {
     }
 
     setRealModeEnabled(false);
-    setErrorMessage("");
+    setErrorMessage(null);
   };
 
   const toggleRealMode = () => {
@@ -977,7 +917,7 @@ function App() {
   };
 
   const saveSettings = async () => {
-    setErrorMessage("");
+    setErrorMessage(null);
 
     const performancePreset = draftConfig.performance_preset;
     const isGpuMode = isGpuComputeMode(draftConfig.compute_mode);
@@ -1020,7 +960,7 @@ function App() {
   };
 
   const runGpuBenchmark = async () => {
-    setErrorMessage("");
+    setErrorMessage(null);
     const gpuDeviceId = sanitizeGpuDeviceId(draftConfig.gpu_device_id, gpuDevices);
 
     try {
@@ -1050,7 +990,7 @@ function App() {
   };
 
   const openLogs = async () => {
-    setErrorMessage("");
+    setErrorMessage(null);
 
     try {
       await invoke("open_log_folder");
@@ -1064,7 +1004,7 @@ function App() {
   };
 
   const copyLogPath = async () => {
-    setErrorMessage("");
+    setErrorMessage(null);
 
     try {
       const path = await invoke<string>("get_log_path");
@@ -1080,7 +1020,7 @@ function App() {
   };
 
   const toggleAlwaysOnTop = async () => {
-    setErrorMessage("");
+    setErrorMessage(null);
 
     const nextValue = !alwaysOnTop;
 
@@ -1167,27 +1107,31 @@ function App() {
         : "CPU"
     : "Simulation";
 
-  const resourceMetrics = [
+  const gpuConfigMetrics: [string, string][] =
+    config.compute_mode !== "cpu" ? [["GPU LIMIT", `${config.gpu_intensity_percent}%`]] : [];
+  const gpuRuntimeMetrics: [string, string][] = realModeEnabled && gpuEnabled
+    ? [
+        ["GPU BACKEND", realStats.gpu_backend || "Starting"],
+        ["GPU DEVICE", realStats.gpu_device_name || "Detecting"],
+        [
+          "GPU DISPATCH",
+          realStats.gpu_dispatch_size
+            ? `${formatDispatchSize(realStats.gpu_dispatch_size)} / ${realStats.gpu_dispatch_ms}ms`
+            : "Waiting",
+        ],
+        ["GPU THROTTLE", realStats.gpu_throttle_ms ? `${realStats.gpu_throttle_ms}ms` : "Off"],
+      ]
+    : [];
+
+  const resourceMetrics: [string, string][] = [
     ["PRESET", performancePresetLabel(config.performance_preset)],
     ["CPU THREADS", `${effectiveCpuThreads}`],
     ["RECOMMENDED", `${systemInfo.recommended_cpu_threads}`],
     ["MODE", modeLabel],
-    ...(config.compute_mode !== "cpu" ? [["GPU LIMIT", `${config.gpu_intensity_percent}%`]] : []),
-    ...(realModeEnabled && gpuEnabled
-      ? [
-          ["GPU BACKEND", realStats.gpu_backend || "Starting"],
-          ["GPU DEVICE", realStats.gpu_device_name || "Detecting"],
-          [
-            "GPU DISPATCH",
-            realStats.gpu_dispatch_size
-              ? `${formatDispatchSize(realStats.gpu_dispatch_size)} / ${realStats.gpu_dispatch_ms}ms`
-              : "Waiting",
-          ],
-          ["GPU THROTTLE", realStats.gpu_throttle_ms ? `${realStats.gpu_throttle_ms}ms` : "Off"],
-        ]
-      : []),
+    ...gpuConfigMetrics,
+    ...gpuRuntimeMetrics,
   ];
-  const metrics = [
+  const metrics: [string, string][] = [
     ["HASHRATE", displayedHashrate],
     ["BEST DIFF", formatDifficulty(realModeEnabled ? realStats.best_difficulty : simulationStats.bestDifficulty)],
     ["BLOCK HEIGHT", blockHeight],
@@ -1221,106 +1165,30 @@ function App() {
 
   return (
     <main className={`pet-shell ${displayMode} ${petStatus === "Lucky Flash" || petStatus === "Jackpot" ? "lucky" : ""}`}>
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">
-            {realModeEnabled
-              ? config.compute_mode === "gpu" ? "GPU MINING"
-                : config.compute_mode === "hybrid" ? "CPU + GPU MINING"
-                : "CPU MINING"
-              : "SIMULATION MODE"}
-          </p>
-          <h1>BTC Lottery Pet</h1>
-        </div>
-        <div className="header-actions">
-          <button
-            className={`mode-button ${displayMode === "detail" ? "armed" : ""}`}
-            onClick={() => setDisplayMode((mode) => (mode === "compact" ? "detail" : "compact"))}
-            title="Toggle compact/detail mode"
-            type="button"
-          >
-            {displayMode === "compact" ? "DETAIL" : "PET"}
-          </button>
-          <button
-            className={`mode-button ${realModeEnabled ? "armed" : ""}`}
-            disabled={isMining}
-            onClick={toggleRealMode}
-            title="Toggle real mining mode"
-            type="button"
-          >
-            {realModeEnabled ? "REAL ON" : "SIM"}
-          </button>
-          <button
-            className={`pin-button ${alwaysOnTop ? "active" : ""}`}
-            onClick={toggleAlwaysOnTop}
-            title="Toggle always on top"
-            type="button"
-          >
-            {alwaysOnTop ? "PIN" : "FREE"}
-          </button>
-        </div>
-      </header>
+      <Header
+        realModeEnabled={realModeEnabled}
+        computeMode={config.compute_mode}
+        displayMode={displayMode}
+        setDisplayMode={setDisplayMode}
+        isMining={isMining}
+        toggleRealMode={toggleRealMode}
+        alwaysOnTop={alwaysOnTop}
+        toggleAlwaysOnTop={toggleAlwaysOnTop}
+      />
 
       <section className="status-row">
-        <div className={`pet-machine-container ${petStatus.toLowerCase().replace(/\s+/g, "-")}`}>
-          <div className="pet-machine">
-            <div className="pet-lights">
-              <span className="light light-1"></span>
-              <span className="light light-2"></span>
-              <span className="light light-3"></span>
-            </div>
-            <div className="pet-screen">
-              <div className="pet-expression">{getPetExpression(petStatus)}</div>
-              <div className="pet-slots">
-                <div className="slot-reel reel-1">
-                  {isMiningAnimation ? (
-                    <div className="reel-strip">
-                      <span>₿</span><span>9</span><span>7</span><span>2</span><span>3</span><span>₿</span>
-                    </div>
-                  ) : (
-                    <span>{getSlotChar(petStatus, 0)}</span>
-                  )}
-                </div>
-                <div className="slot-reel reel-2">
-                  {isMiningAnimation ? (
-                    <div className="reel-strip delay-1">
-                      <span>7</span><span>₿</span><span>1</span><span>8</span><span>5</span><span>7</span>
-                    </div>
-                  ) : (
-                    <span>{getSlotChar(petStatus, 1)}</span>
-                  )}
-                </div>
-                <div className="slot-reel reel-3">
-                  {isMiningAnimation ? (
-                    <div className="reel-strip delay-2">
-                      <span>9</span><span>2</span><span>₿</span><span>7</span><span>6</span><span>9</span>
-                    </div>
-                  ) : (
-                    <span>{getSlotChar(petStatus, 2)}</span>
-                  )}
-                </div>
-              </div>
-            </div>
-            <div className="pet-panel-decor">
-              <span className="decor-btn decor-btn-red"></span>
-              <span className="decor-btn decor-btn-blue"></span>
-            </div>
-            <div className="smoke-container">
-              <span className="smoke-puff puff-1"></span>
-              <span className="smoke-puff puff-2"></span>
-            </div>
-          </div>
-        </div>
-
-        {displayMode === "compact" && (
-          <div className="mini-stats-line">
-            <span>{compactComputeMode}: {displayedHashrate}</span>
-            <span className="divider">|</span>
-            <span>D: {formatDifficulty(realModeEnabled ? realStats.best_difficulty : simulationStats.bestDifficulty)}</span>
-            <span className="divider">|</span>
-            <span>B: {blockHeight}</span>
-          </div>
-        )}
+        <PetDisplay
+          petStatus={petStatus}
+          isMiningAnimation={isMiningAnimation}
+          displayMode={displayMode}
+          compactComputeMode={compactComputeMode}
+          displayedHashrate={displayedHashrate}
+          realModeEnabled={realModeEnabled}
+          realStats={realStats}
+          simulationStats={simulationStats}
+          blockHeight={blockHeight}
+          formatDifficulty={formatDifficulty}
+        />
 
         <div className="status-copy">
           <p className="label">STATUS</p>
@@ -1337,48 +1205,23 @@ function App() {
         </button>
       </section>
 
-      {displayMode === "detail" && (
-        <section className="metrics">
-          {metrics.map(([label, value]) => (
-            <article key={label}>
-              <p className="label">{label}</p>
-              <strong title={value}>{value}</strong>
-            </article>
-          ))}
-        </section>
-      )}
+      <MetricsGrid
+        displayMode={displayMode}
+        realModeEnabled={realModeEnabled}
+        metrics={metrics}
+        resourceMetrics={resourceMetrics}
+        poolStatus={poolStatus}
+        authStatus={authStatus}
+        jobStatus={jobStatus}
+        lastShare={lastShare}
+      />
 
-      {displayMode === "detail" && (
-        <section className="resource-status-strip" aria-label="Resource status">
-          {resourceMetrics.map(([label, value]) => (
-            <span key={label}><b>{label}</b>{value}</span>
-          ))}
-        </section>
-      )}
-
-      {displayMode === "detail" && realModeEnabled && (
-        <section className="real-status-strip" aria-label="Real mining connection status">
-          <span><b>POOL</b>{poolStatus}</span>
-          <span><b>AUTH</b>{authStatus}</span>
-          <span><b>JOB</b>{jobStatus}</span>
-          <span><b>LAST SHARE</b>{lastShare}</span>
-        </section>
-      )}
-
-      {displayMode === "detail" && (
-        <div className="log-ticker">
-          <span className="log-label">LOG:</span>
-          <span className="log-text" title={latestLog}>{latestLog}</span>
-          <div className="log-actions">
-            <button className="mini-button" onClick={() => void openLogs()} type="button">
-              OPEN LOGS
-            </button>
-            <button className="mini-button" onClick={() => void copyLogPath()} type="button">
-              COPY LOG PATH
-            </button>
-          </div>
-        </div>
-      )}
+      <LogTicker
+        displayMode={displayMode}
+        latestLog={latestLog}
+        openLogs={openLogs}
+        copyLogPath={copyLogPath}
+      />
 
       <footer>
         <span className={`dot ${realModeEnabled ? "armed" : ""}`} />
@@ -1400,7 +1243,11 @@ function App() {
         <span className="cpu">{effectiveCpuThreads} thread{effectiveCpuThreads === 1 ? "" : "s"}</span>
       </footer>
 
-      {errorMessage && <p className="error-banner">{errorMessage}</p>}
+      {errorMessage && (
+        <p className="error-banner" onClick={() => setErrorMessage(null)} title="Click to dismiss">
+          {errorMessage}
+        </p>
+      )}
 
       {showWarning && (
         <section className="overlay" role="dialog" aria-modal="true" aria-label="Real mining warning">
@@ -1430,385 +1277,48 @@ function App() {
         </section>
       )}
 
-      {showSettings && (
-        <section className="overlay" role="dialog" aria-modal="true" aria-label="Mining settings">
-          <div className="settings-panel">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">LOCAL CONFIG</p>
-                <h2>Mining settings</h2>
-              </div>
-              <button className="close-button" onClick={() => setShowSettings(false)} type="button">
-                X
+      {showCpuWarning && (
+        <section className="overlay" role="dialog" aria-modal="true" aria-label="High CPU warning">
+          <div className="warning-card">
+            <p className="eyebrow">CPU WARNING</p>
+            <h2>High CPU usage</h2>
+            <p>
+              High CPU usage may heat your computer. Are you sure you want to continue?
+            </p>
+            <div className="panel-actions">
+              <button className="secondary-button" onClick={() => setShowCpuWarning(false)} type="button">
+                CANCEL
               </button>
-            </div>
-            <div className="form-grid">
-              <label>
-                BTC ADDRESS
-                <input
-                  value={draftConfig.btc_address}
-                  onChange={(event) =>
-                    setDraftConfig({ ...draftConfig, btc_address: event.target.value })
-                  }
-                  placeholder="bc1..."
-                />
-              </label>
-              <label>
-                POOL HOST
-                <input
-                  list="pool-presets"
-                  value={draftConfig.pool_host}
-                  onChange={(event) => {
-                    const poolHost = event.target.value;
-                    setDraftConfig({
-                      ...draftConfig,
-                      pool_host: poolHost,
-                      pool_port: presetPort(poolHost, draftConfig.pool_port),
-                    });
-                  }}
-                />
-                <datalist id="pool-presets">
-                  <option value="public-pool.io" />
-                  <option value="pool.nerdminers.org" />
-                </datalist>
-              </label>
-              <label>
-                PORT
-                <input
-                  type="number"
-                  value={draftConfig.pool_port}
-                  onChange={(event) =>
-                    setDraftConfig({ ...draftConfig, pool_port: Number(event.target.value) })
-                  }
-                />
-              </label>
-              <label>
-                WORKER
-                <input
-                  value={draftConfig.worker_name}
-                  onChange={(event) =>
-                    setDraftConfig({ ...draftConfig, worker_name: event.target.value })
-                  }
-                />
-              </label>
-              <label className="full-width">
-                COMPUTE MODE
-                <select
-                  value={draftConfig.compute_mode}
-                  onChange={(event) => {
-                    const computeMode = event.target.value as ComputeMode;
-                    const isGpu = isGpuComputeMode(computeMode);
-                    setDraftConfig({
-                      ...draftConfig,
-                      compute_mode: computeMode,
-                      gpu_enabled: isGpu,
-                      gpu_device_id: isGpu
-                        ? sanitizeGpuDeviceId(draftConfig.gpu_device_id, gpuDevices)
-                        : null,
-                      performance_preset: draftConfig.performance_preset,
-                      cpu_threads: computeMode === "gpu"
-                        ? Number(draftConfig.cpu_threads)
-                        : threadsForPreset(
-                            draftConfig.performance_preset,
-                            systemInfo,
-                            Number(draftConfig.cpu_threads),
-                            false,
-                          ),
-                    });
-                  }}
-                >
-                  <option value="cpu">CPU Only</option>
-                  <option value="gpu">GPU Only</option>
-                  <option value="hybrid">CPU + GPU</option>
-                </select>
-              </label>
-              <div className="compute-status full-width" aria-label="Compute status">
-                <span>ACTIVE PLAN</span>
-                <strong>
-                  {draftConfig.compute_mode === "cpu"
-                    ? `${draftEffectiveCpuThreads} CPU thread${draftEffectiveCpuThreads === 1 ? "" : "s"}`
-                    : draftConfig.compute_mode === "gpu"
-                      ? "GPU worker, 0 CPU hash threads"
-                      : `${draftEffectiveCpuThreads} CPU thread${draftEffectiveCpuThreads === 1 ? "" : "s"} + GPU worker`}
-                </strong>
-                <p className="field-hint">
-                  {draftConfig.compute_mode === "cpu"
-                    ? "GPU controls stay disabled in CPU Only mode."
-                    : draftConfig.compute_mode === "gpu"
-                      ? "CPU presets are ignored in GPU Only mode. Use GPU Limit below to reduce GPU pressure."
-                      : "Performance Preset controls only the CPU side of Hybrid mode."}
-                </p>
-              </div>
-              {!isDraftGpuOnly ? (
-                <>
-                  <label>
-                    PERFORMANCE PRESET
-                    <select
-                      value={draftConfig.performance_preset}
-                      onChange={(event) => {
-                        const performancePreset = event.target.value as PerformancePreset;
-                        setDraftConfig({
-                          ...draftConfig,
-                          performance_preset: performancePreset,
-                          cpu_threads: threadsForPreset(
-                            performancePreset,
-                            systemInfo,
-                            Number(draftConfig.cpu_threads),
-                            false,
-                          ),
-                        });
-                      }}
-                    >
-                      <option value="eco">Eco - 1 CPU thread</option>
-                      <option value="normal">
-                        Normal - {systemInfo.recommended_cpu_threads} CPU thread{systemInfo.recommended_cpu_threads === 1 ? "" : "s"}
-                      </option>
-                      <option value="turbo">
-                        Turbo - {systemInfo.available_parallelism} CPU thread{systemInfo.available_parallelism === 1 ? "" : "s"}
-                      </option>
-                      <option value="custom">Custom</option>
-                    </select>
-                  </label>
-                  <label>
-                    CPU THREADS
-                    <select
-                      disabled={draftConfig.performance_preset !== "custom"}
-                      value={draftEffectiveCpuThreads}
-                      onChange={(event) =>
-                        setDraftConfig({
-                          ...draftConfig,
-                          performance_preset: "custom",
-                          cpu_threads: Number(event.target.value),
-                        })
-                      }
-                    >
-                      {cpuThreadOptions.map((threads) => (
-                        <option key={threads} value={threads}>
-                          {threads} thread{threads === 1 ? "" : "s"}{threads === systemInfo.available_parallelism ? " (max)" : ""}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </>
-              ) : (
-                <div className="compute-status full-width" aria-label="CPU workers">
-                  <span>CPU WORKERS</span>
-                  <strong>0 threads (GPU only)</strong>
-                  <p className="field-hint">
-                    Real mining will start one GPU worker and no CPU hash workers.
-                  </p>
-                </div>
-              )}
-              {draftConfig.compute_mode !== "cpu" && (
-                <>
-                  <label>
-                    GPU DEVICE
-                    <select
-                      value={sanitizeGpuDeviceId(draftConfig.gpu_device_id, gpuDevices) || "auto"}
-                      onChange={(event) =>
-                        setDraftConfig({
-                          ...draftConfig,
-                          gpu_device_id: sanitizeGpuDeviceId(
-                            event.target.value === "auto" ? null : event.target.value,
-                            gpuDevices,
-                          ),
-                        })
-                      }
-                    >
-                      {gpuDevices.map((device) => (
-                        <option key={device.id} value={device.id} disabled={device.simulated && device.id !== "auto"}>
-                          {device.name}{device.simulated && device.id !== "auto" ? " (software - disabled)" : ""}
-                        </option>
-                      ))}
-                    </select>
-                    {!hardwareGpuAvailable && !softwareGpuAvailable && (
-                      <p className="field-hint warning">
-                        No compatible GPU detected. Try updating your GPU drivers.
-                      </p>
-                    )}
-                    {!hardwareGpuAvailable && softwareGpuAvailable && (
-                      <p className="field-hint warning">
-                        Only software GPU adapters were detected. They are disabled for real mining.
-                      </p>
-                    )}
-                    {hardwareGpuAvailable && softwareGpuAvailable && (
-                      <p className="field-hint">
-                        Software adapters are disabled. Auto will prefer a hardware GPU backend.
-                      </p>
-                    )}
-                  </label>
-                  <label>
-                    GPU LIMIT
-                    <select
-                      value={draftConfig.gpu_intensity_percent}
-                      onChange={(event) =>
-                        setDraftConfig({
-                          ...draftConfig,
-                          gpu_intensity_percent: Number(event.target.value),
-                        })
-                      }
-                    >
-                      {[10, 25, 50, 75, 100].map((intensity) => (
-                        <option key={intensity} value={intensity}>
-                          {intensity}%
-                        </option>
-                      ))}
-                    </select>
-                    <p className="field-hint">
-                      Soft duty-cycle limiter. 100% means no intentional throttle sleep.
-                    </p>
-                  </label>
-                </>
-              )}
-              <label>
-                ENABLE NOTIFICATIONS
-                <select
-                  value={draftConfig.enable_notifications ? "true" : "false"}
-                  onChange={(event) =>
-                    setDraftConfig({
-                      ...draftConfig,
-                      enable_notifications: event.target.value === "true",
-                    })
-                  }
-                >
-                  <option value="true">Enabled</option>
-                  <option value="false">Disabled</option>
-                </select>
-              </label>
-              <label>
-                NOTIFY JACKPOT
-                <select
-                  value={draftConfig.notify_on_jackpot ? "true" : "false"}
-                  onChange={(event) =>
-                    setDraftConfig({
-                      ...draftConfig,
-                      notify_on_jackpot: event.target.value === "true",
-                    })
-                  }
-                >
-                  <option value="true">Enabled</option>
-                  <option value="false">Disabled</option>
-                </select>
-              </label>
-              <label>
-                NOTIFY SHARE ACCEPTED
-                <select
-                  value={draftConfig.notify_on_share_accepted ? "true" : "false"}
-                  onChange={(event) =>
-                    setDraftConfig({
-                      ...draftConfig,
-                      notify_on_share_accepted: event.target.value === "true",
-                    })
-                  }
-                >
-                  <option value="false">Disabled</option>
-                  <option value="true">Enabled</option>
-                </select>
-              </label>
-              <label>
-                NOTIFY CONNECTION ERROR
-                <select
-                  value={draftConfig.notify_on_connection_error ? "true" : "false"}
-                  onChange={(event) =>
-                    setDraftConfig({
-                      ...draftConfig,
-                      notify_on_connection_error: event.target.value === "true",
-                    })
-                  }
-                >
-                  <option value="true">Enabled</option>
-                  <option value="false">Disabled</option>
-                </select>
-              </label>
-              <label>
-                HEARTBEAT INTERVAL
-                <select
-                  value={draftConfig.heartbeat_interval}
-                  onChange={(event) =>
-                    setDraftConfig({
-                      ...draftConfig,
-                      heartbeat_interval: event.target.value as HeartbeatInterval,
-                    })
-                  }
-                >
-                  <option value="off">Off</option>
-                  <option value="30min">30 min</option>
-                  <option value="1h">1 hour</option>
-                  <option value="6h">6 hours</option>
-                </select>
-              </label>
-              <label>
-                NOTIFICATION CHANNEL
-                <select
-                  value={draftConfig.notification_channel}
-                  onChange={(event) =>
-                    setDraftConfig({
-                      ...draftConfig,
-                      notification_channel: event.target.value as NotificationChannel,
-                    })
-                  }
-                >
-                  <option value="local_windows_toast">Local Windows Toast</option>
-                  <option value="webhook">Webhook</option>
-                  <option value="telegram_bot" disabled>
-                    Telegram Bot (Coming Soon)
-                  </option>
-                  <option value="ntfy_sh" disabled>
-                    ntfy.sh (Coming Soon)
-                  </option>
-                </select>
-              </label>
-              <label className="full-width">
-                WEBHOOK URL
-                <input
-                  disabled={draftConfig.notification_channel !== "webhook"}
-                  value={draftConfig.webhook_url}
-                  onChange={(event) =>
-                    setDraftConfig({ ...draftConfig, webhook_url: event.target.value })
-                  }
-                  placeholder="https://example.com/btc-lottery-pet"
-                />
-              </label>
-            </div>
-            <div className="benchmark-row">
               <button
-                className="secondary-button"
-                disabled={draftConfig.compute_mode === "cpu"}
-                onClick={() => void runGpuBenchmark()}
+                className="confirm-button"
+                onClick={() => void confirmCpuWarning()}
                 type="button"
               >
-                RUN BENCHMARK
-              </button>
-              {benchmarkResult && (
-                <div className="benchmark-result">
-                  <div>
-                    <span>Device</span>
-                    <strong>{benchmarkResult.device_name}</strong>
-                  </div>
-                  <div>
-                    <span>Mode</span>
-                    <strong>{benchmarkResult.simulated ? "Simulated" : "Real GPU"}</strong>
-                  </div>
-                  <div>
-                    <span>Hashrate</span>
-                    <strong>{formatHashrate(benchmarkResult.hashrate)}</strong>
-                  </div>
-                  <div>
-                    <span>Intensity</span>
-                    <strong>{benchmarkResult.gpu_intensity_percent}%</strong>
-                  </div>
-                  <p>{benchmarkResult.note}</p>
-                </div>
-              )}
-            </div>
-            <div className="panel-actions">
-              <span>Real mining requires the REAL mode toggle.</span>
-              <button className="confirm-button" onClick={saveSettings} type="button">
-                SAVE
+                CONTINUE
               </button>
             </div>
           </div>
         </section>
+      )}
+
+      {showSettings && (
+        <SettingsPanel
+          draftConfig={draftConfig}
+          setDraftConfig={setDraftConfig}
+          setShowSettings={setShowSettings}
+          saveSettings={saveSettings}
+          runGpuBenchmark={runGpuBenchmark}
+          benchmarkResult={benchmarkResult}
+          gpuDevices={gpuDevices}
+          systemInfo={systemInfo}
+          formatHashrate={formatHashrate}
+          sanitizeGpuDeviceId={sanitizeGpuDeviceId}
+          presetPort={presetPort}
+          threadsForPreset={threadsForPreset}
+          isGpuComputeMode={isGpuComputeMode}
+          hasHardwareGpuDevice={hasHardwareGpuDevice}
+          hasSoftwareGpuDevice={hasSoftwareGpuDevice}
+        />
       )}
 
       {showJackpot && blockFound && (
@@ -1849,7 +1359,7 @@ function App() {
               <button className="secondary-button" onClick={() => void openLogs()} type="button">
                 OPEN LOGS
               </button>
-              <button className="confirm-button" onClick={() => setShowJackpot(false)} type="button">
+              <button className="confirm-button" onClick={() => { setShowJackpot(false); setBlockFound(null); }} type="button">
                 DISMISS
               </button>
             </div>
