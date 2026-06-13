@@ -25,7 +25,10 @@ const MAX_EXTRANONCE2_BYTES: usize = 16;
 const MAX_PENDING_SUBMISSIONS: usize = 128;
 const MAX_SHARE_SUBMISSIONS_PER_TICK: usize = 16;
 const SHARE_QUEUE_CAPACITY: usize = 256;
-const MIN_SHARE_DIFFICULTY: f64 = 1e-12;
+// Below this, the share target saturates the full 256-bit hash space and every
+// nonce qualifies. Treat that as a misconfigured pool rather than flooding the
+// share path.
+const MIN_SHARE_DIFFICULTY: f64 = 1e-9;
 const MAX_LOG_FILE_BYTES: u64 = 1024 * 1024;
 const STATS_EVENT: &str = "mining-stats";
 const BLOCK_FOUND_EVENT: &str = "block-found";
@@ -213,7 +216,12 @@ impl MiningController {
     }
 
     pub fn stop(&self, app: &AppHandle) {
-        if let Some(stop) = self.stop_signal.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some(stop) = self
+            .stop_signal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             log_message(app, "Mining stop requested");
             stop.store(true, Ordering::Release);
         }
@@ -253,7 +261,6 @@ pub(crate) struct SharedMiningState {
     pub(crate) gpu_dispatch_size: AtomicU64,
     pub(crate) gpu_dispatch_ms: AtomicU64,
     pub(crate) gpu_throttle_ms: AtomicU64,
-
 }
 
 impl SharedMiningState {
@@ -272,21 +279,36 @@ impl SharedMiningState {
             gpu_dispatch_size: AtomicU64::new(0),
             gpu_dispatch_ms: AtomicU64::new(0),
             gpu_throttle_ms: AtomicU64::new(0),
-
         }
     }
 
     pub(crate) fn set_connection_status(&self, status: impl Into<String>) {
-        *self.connection_status.lock().unwrap_or_else(|e| e.into_inner()) = status.into();
+        *self
+            .connection_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = status.into();
     }
 
-    pub(crate) fn set_gpu_runtime(&self, backend: impl Into<String>, device_name: impl Into<String>) {
+    pub(crate) fn set_gpu_runtime(
+        &self,
+        backend: impl Into<String>,
+        device_name: impl Into<String>,
+    ) {
         *self.gpu_backend.lock().unwrap_or_else(|e| e.into_inner()) = backend.into();
-        *self.gpu_device_name.lock().unwrap_or_else(|e| e.into_inner()) = device_name.into();
+        *self
+            .gpu_device_name
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = device_name.into();
     }
 
-    pub(crate) fn set_gpu_dispatch_stats(&self, dispatch_size: u64, dispatch_ms: u64, throttle_ms: u64) {
-        self.gpu_dispatch_size.store(dispatch_size, Ordering::Relaxed);
+    pub(crate) fn set_gpu_dispatch_stats(
+        &self,
+        dispatch_size: u64,
+        dispatch_ms: u64,
+        throttle_ms: u64,
+    ) {
+        self.gpu_dispatch_size
+            .store(dispatch_size, Ordering::Relaxed);
         self.gpu_dispatch_ms.store(dispatch_ms, Ordering::Relaxed);
         self.gpu_throttle_ms.store(throttle_ms, Ordering::Relaxed);
     }
@@ -332,9 +354,21 @@ impl SharedMiningState {
             rejected_shares: self.rejected_shares.load(Ordering::Relaxed),
             best_difficulty: f64::from_bits(self.best_difficulty_bits.load(Ordering::Relaxed)),
             current_job_id,
-            connection_status: self.connection_status.lock().unwrap_or_else(|e| e.into_inner()).clone(),
-            gpu_backend: self.gpu_backend.lock().unwrap_or_else(|e| e.into_inner()).clone(),
-            gpu_device_name: self.gpu_device_name.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            connection_status: self
+                .connection_status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            gpu_backend: self
+                .gpu_backend
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            gpu_device_name: self
+                .gpu_device_name
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             gpu_dispatch_size: self.gpu_dispatch_size.load(Ordering::Relaxed),
             gpu_dispatch_ms: self.gpu_dispatch_ms.load(Ordering::Relaxed),
             gpu_throttle_ms: self.gpu_throttle_ms.load(Ordering::Relaxed),
@@ -362,8 +396,6 @@ fn run_miner(app: AppHandle, settings: RealMiningSettings, stop: Arc<AtomicBool>
     let (share_sender, share_receiver) = mpsc::sync_channel(SHARE_QUEUE_CAPACITY);
     let workers = spawn_hash_workers(&settings, &shared, &share_sender, &app);
 
-
-
     while !stop.load(Ordering::Acquire) {
         shared.set_connection_status("Connecting");
 
@@ -380,8 +412,6 @@ fn run_miner(app: AppHandle, settings: RealMiningSettings, stop: Arc<AtomicBool>
             );
             sleep_until_stopped(&stop, Duration::from_secs(2));
         }
-
-
     }
 
     stop.store(true, Ordering::Release);
@@ -458,7 +488,11 @@ fn run_stratum_connection(
             return Err("no message received from pool for 5 minutes".into());
         }
 
-        let has_job = shared.job.read().unwrap_or_else(|e| e.into_inner()).is_some();
+        let has_job = shared
+            .job
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
         if has_job {
             last_job_received = Instant::now();
             debug_hint_logged = false;
@@ -509,7 +543,7 @@ fn run_stratum_connection(
         }
 
         match read_stratum_line(&mut reader) {
-            Ok(None) => return Err("pool closed the connection".into()),
+            Ok(None) => return Err(format!("pool {address} closed the connection")),
             Ok(Some(line)) => {
                 last_activity = Instant::now();
                 handle_server_message(
@@ -550,6 +584,18 @@ fn handle_server_message(
     shared: &Arc<SharedMiningState>,
     pending_submissions: &mut HashSet<u64>,
 ) -> Result<(), String> {
+    handle_server_message_with_logger(line, protocol, shared, pending_submissions, |message| {
+        log_message(app, message)
+    })
+}
+
+fn handle_server_message_with_logger(
+    line: &str,
+    protocol: &mut ProtocolState,
+    shared: &Arc<SharedMiningState>,
+    pending_submissions: &mut HashSet<u64>,
+    mut log: impl FnMut(&str),
+) -> Result<(), String> {
     if line.is_empty() {
         return Ok(());
     }
@@ -563,7 +609,7 @@ fn handle_server_message(
                 let difficulty = value_as_f64(&message["params"][0])
                     .ok_or_else(|| "pool sent an invalid share difficulty".to_string())?;
                 protocol.difficulty = validate_share_difficulty(difficulty)?;
-                log_message(app, &format!("Pool set share difficulty: {difficulty}"));
+                log(&format!("Pool set share difficulty: {difficulty}"));
             }
             "mining.set_extranonce" => {
                 protocol.extranonce1 = message["params"][0].as_str().map(str::to_owned);
@@ -579,7 +625,7 @@ fn handle_server_message(
                     let diff = job.share_difficulty;
                     shared.set_job(job);
                     shared.set_connection_status("Mining");
-                    log_message(app, &format!("Job received: id={}, diff={}", job_id, diff));
+                    log(&format!("Job received: id={}, diff={}", job_id, diff));
                 }
             }
             _ => {}
@@ -596,7 +642,11 @@ fn handle_server_message(
         let result = message
             .get("result")
             .and_then(Value::as_array)
-            .ok_or_else(|| "pool rejected mining.subscribe".to_string())?;
+            .ok_or_else(|| {
+                pool_response_error(&message)
+                    .map(|reason| format!("pool rejected mining.subscribe: {reason}"))
+                    .unwrap_or_else(|| "pool returned an invalid mining.subscribe response".into())
+            })?;
         protocol.extranonce1 = result.get(1).and_then(Value::as_str).map(str::to_owned);
         protocol.extranonce2_size = result
             .get(2)
@@ -611,26 +661,43 @@ fn handle_server_message(
         shared.set_connection_status("Authorizing");
     } else if id == 2 {
         if message.get("result").and_then(Value::as_bool) != Some(true) {
-            return Err("pool rejected mining.authorize".into());
+            let reason = pool_response_error(&message)
+                .unwrap_or_else(|| "authorization returned false".into());
+            return Err(format!("pool rejected mining.authorize: {reason}"));
         }
 
         shared.set_connection_status("Authorized");
-        log_message(app, "Worker authorized successfully");
+        log("Worker authorized successfully");
     } else if pending_submissions.remove(&id) {
         if message.get("result").and_then(Value::as_bool) == Some(true) {
             shared.accepted_shares.fetch_add(1, Ordering::Relaxed);
-            log_message(app, "Share accepted!");
+            log("Share accepted!");
         } else {
             shared.rejected_shares.fetch_add(1, Ordering::Relaxed);
             let err_str = message
                 .get("error")
                 .map(|e| e.to_string())
                 .unwrap_or_else(|| "unknown error".to_string());
-            log_message(app, &format!("Share rejected. Reason: {}", err_str));
+            log(&format!("Share rejected. Reason: {}", err_str));
         }
     }
 
     Ok(())
+}
+
+fn pool_response_error(message: &Value) -> Option<String> {
+    if let Some(error) = message.get("error") {
+        if !error.is_null() {
+            return Some(error.to_string());
+        }
+    }
+
+    message
+        .get("result")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_owned)
 }
 
 fn parse_job(
@@ -1128,7 +1195,7 @@ fn write_message(stream: &mut TcpStream, message: &Value) -> Result<(), String> 
         .map_err(|error| format!("socket write failed: {error}"))
 }
 
-fn emit_stats(app: &AppHandle, shared: &SharedMiningState, hashrate: f64) {
+pub(crate) fn emit_stats(app: &AppHandle, shared: &SharedMiningState, hashrate: f64) {
     let _ = app.emit(STATS_EVENT, shared.snapshot(hashrate));
 }
 
@@ -1141,14 +1208,32 @@ fn sleep_until_stopped(stop: &AtomicBool, duration: Duration) {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufReader, Cursor, ErrorKind};
+    use std::{
+        collections::HashSet,
+        io::{BufRead, BufReader, Cursor, ErrorKind},
+        net::{TcpListener, TcpStream},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        thread,
+        time::Duration,
+    };
 
     use super::{
-        difficulty_from_hash, extranonce2_hex, found_block_event, hash_meets_network_target,
-        read_stratum_line, target_from_nbits, validate_mainnet_address, validate_share_difficulty,
-        word_swapped_hex, JobTemplate, RealMiningSettings, MAX_PENDING_SUBMISSIONS,
+        difficulty_from_hash, extranonce2_hex, found_block_event,
+        handle_server_message_with_logger, hash_meets_network_target, read_stratum_line,
+        target_from_nbits, validate_mainnet_address, validate_share_difficulty, word_swapped_hex,
+        JobTemplate, ProtocolState, RealMiningSettings, SharedMiningState, MAX_PENDING_SUBMISSIONS,
         MAX_SHARE_SUBMISSIONS_PER_TICK, MAX_STRATUM_LINE_BYTES,
     };
+
+    fn read_mock_line(reader: &mut BufReader<TcpStream>) -> String {
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("mock pool read line");
+        assert!(!line.is_empty(), "mock pool connection closed early");
+        line
+    }
 
     #[test]
     fn formats_extranonce2_to_pool_width() {
@@ -1211,13 +1296,13 @@ mod tests {
             "00000001",
             &[0; 32],
             42.0,
-            "public-pool.io:21496",
+            "public-pool.io:3333",
         );
         let serialized = serde_json::to_string(&event).unwrap();
 
         assert_eq!(event.job_id, "job-7");
         assert_eq!(event.nonce, "1234abcd");
-        assert!(serialized.contains("public-pool.io:21496"));
+        assert!(serialized.contains("public-pool.io:3333"));
         assert!(!serialized.contains("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"));
     }
 
@@ -1231,6 +1316,8 @@ mod tests {
     #[test]
     fn rejects_pathological_share_difficulty() {
         assert!(validate_share_difficulty(0.0001).is_ok());
+        assert!(validate_share_difficulty(1e-9).is_ok());
+        assert!(validate_share_difficulty(1e-10).is_err());
         assert!(validate_share_difficulty(0.0).is_err());
         assert!(validate_share_difficulty(f64::EPSILON).is_err());
         assert!(validate_share_difficulty(f64::INFINITY).is_err());
@@ -1243,6 +1330,232 @@ mod tests {
         let error = read_stratum_line(&mut reader).unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn surfaces_pool_rejection_reason_from_result_text() {
+        let message = serde_json::json!({
+            "id": 1,
+            "result": "Only allowed user agents may subscribe",
+            "error": null
+        });
+
+        assert_eq!(
+            super::pool_response_error(&message).as_deref(),
+            Some("Only allowed user agents may subscribe")
+        );
+    }
+
+    #[test]
+    fn mock_stratum_pool_drives_handshake_job_and_share_accounting() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+
+            let subscribe = read_mock_line(&mut reader);
+            assert!(subscribe.contains("\"mining.subscribe\""));
+            super::write_message(
+                &mut stream,
+                &serde_json::json!({
+                    "id": 1,
+                    "result": [null, "abcd", 4],
+                    "error": null
+                }),
+            )
+            .unwrap();
+
+            let authorize = read_mock_line(&mut reader);
+            assert!(authorize.contains("\"mining.authorize\""));
+            super::write_message(
+                &mut stream,
+                &serde_json::json!({
+                    "id": 2,
+                    "result": true,
+                    "error": null
+                }),
+            )
+            .unwrap();
+            super::write_message(
+                &mut stream,
+                &serde_json::json!({
+                    "method": "mining.set_difficulty",
+                    "params": [0.001]
+                }),
+            )
+            .unwrap();
+            super::write_message(
+                &mut stream,
+                &serde_json::json!({
+                    "method": "mining.notify",
+                    "params": [
+                        "job-1",
+                        "0000000000000000000000000000000000000000000000000000000000000000",
+                        "00",
+                        "00",
+                        [],
+                        "20000000",
+                        "1d00ffff",
+                        "5f5e1000",
+                        true
+                    ]
+                }),
+            )
+            .unwrap();
+
+            let submit = read_mock_line(&mut reader);
+            assert!(submit.contains("\"mining.submit\""));
+            super::write_message(
+                &mut stream,
+                &serde_json::json!({
+                    "id": 11,
+                    "result": true,
+                    "error": null
+                }),
+            )
+            .unwrap();
+
+            let rejected_submit = read_mock_line(&mut reader);
+            assert!(rejected_submit.contains("\"mining.submit\""));
+            super::write_message(
+                &mut stream,
+                &serde_json::json!({
+                    "id": 12,
+                    "result": false,
+                    "error": ["low difficulty share", 23, null]
+                }),
+            )
+            .unwrap();
+        });
+
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let shared = Arc::new(SharedMiningState::new(stop));
+        let mut protocol = ProtocolState {
+            difficulty: 0.001,
+            ..ProtocolState::default()
+        };
+        let mut pending_submissions = HashSet::new();
+        let mut logs = Vec::new();
+
+        super::write_message(
+            &mut stream,
+            &serde_json::json!({
+                "id": 1,
+                "method": "mining.subscribe",
+                "params": ["BTC Lottery Pet/test"]
+            }),
+        )
+        .unwrap();
+        super::write_message(
+            &mut stream,
+            &serde_json::json!({
+                "id": 2,
+                "method": "mining.authorize",
+                "params": ["1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa.worker", "x"]
+            }),
+        )
+        .unwrap();
+
+        for _ in 0..4 {
+            let line = read_stratum_line(&mut reader).unwrap().unwrap();
+            handle_server_message_with_logger(
+                line.trim(),
+                &mut protocol,
+                &shared,
+                &mut pending_submissions,
+                |message| logs.push(message.to_owned()),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            shared
+                .job
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|job| job.job_id.as_str()),
+            Some("job-1")
+        );
+        assert_eq!(shared.connection_status.lock().unwrap().as_str(), "Mining");
+
+        pending_submissions.insert(11);
+        super::write_message(
+            &mut stream,
+            &serde_json::json!({
+                "id": 11,
+                "method": "mining.submit",
+                "params": [
+                    "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa.worker",
+                    "job-1",
+                    "00000001",
+                    "5f5e1000",
+                    "00000000"
+                ]
+            }),
+        )
+        .unwrap();
+        let line = read_stratum_line(&mut reader).unwrap().unwrap();
+        handle_server_message_with_logger(
+            line.trim(),
+            &mut protocol,
+            &shared,
+            &mut pending_submissions,
+            |message| logs.push(message.to_owned()),
+        )
+        .unwrap();
+
+        assert_eq!(shared.accepted_shares.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.rejected_shares.load(Ordering::Relaxed), 0);
+        assert!(logs.iter().any(|line| line == "Share accepted!"));
+
+        pending_submissions.insert(12);
+        super::write_message(
+            &mut stream,
+            &serde_json::json!({
+                "id": 12,
+                "method": "mining.submit",
+                "params": [
+                    "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa.worker",
+                    "job-1",
+                    "00000002",
+                    "5f5e1000",
+                    "00000001"
+                ]
+            }),
+        )
+        .unwrap();
+        let line = read_stratum_line(&mut reader).unwrap().unwrap();
+        handle_server_message_with_logger(
+            line.trim(),
+            &mut protocol,
+            &shared,
+            &mut pending_submissions,
+            |message| logs.push(message.to_owned()),
+        )
+        .unwrap();
+
+        assert_eq!(shared.accepted_shares.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.rejected_shares.load(Ordering::Relaxed), 1);
+        assert!(logs
+            .iter()
+            .any(|line| line.contains("low difficulty share")));
+        server.join().unwrap();
     }
 
     #[test]
@@ -1267,7 +1580,7 @@ mod tests {
             .unwrap_or(1);
         let settings = RealMiningSettings {
             pool_host: "public-pool.io".into(),
-            pool_port: 21496,
+            pool_port: 3333,
             btc_address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa".into(),
             worker_name: "btc-lottery-pet".into(),
             cpu_threads: available_threads + 1,

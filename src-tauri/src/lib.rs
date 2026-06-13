@@ -18,6 +18,9 @@ use tauri::{
 };
 
 const DEFAULT_CONFIG: &str = include_str!("../../config.json");
+const DEFAULT_POOL_HOST: &str = "public-pool.io";
+const DEFAULT_POOL_PORT: u16 = 3333;
+const OLD_PUBLIC_POOL_PORT: u16 = 21496;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,8 +69,8 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             btc_address: String::new(),
-            pool_host: "public-pool.io".into(),
-            pool_port: 21496,
+            pool_host: DEFAULT_POOL_HOST.into(),
+            pool_port: DEFAULT_POOL_PORT,
             worker_name: "btc-lottery-pet".into(),
             cpu_threads: 1,
             performance_preset: PerformancePreset::Eco,
@@ -100,7 +103,13 @@ impl AppConfig {
             .filter(|device_id| !device_id.is_empty());
 
         if self.pool_host.is_empty() {
-            self.pool_host = "public-pool.io".into();
+            self.pool_host = DEFAULT_POOL_HOST.into();
+        }
+
+        if self.pool_host.eq_ignore_ascii_case(DEFAULT_POOL_HOST)
+            && self.pool_port == OLD_PUBLIC_POOL_PORT
+        {
+            self.pool_port = DEFAULT_POOL_PORT;
         }
 
         if self.pool_port == 0 {
@@ -129,6 +138,9 @@ impl AppConfig {
             ComputeMode::Gpu | ComputeMode::Hybrid => {
                 self.gpu_enabled = true;
             }
+        }
+        if self.compute_mode == ComputeMode::Gpu {
+            self.cpu_threads = 0;
         }
 
         self
@@ -160,6 +172,39 @@ struct GpuBenchmarkResult {
     note: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct DiagnosticConfig {
+    pool_host: String,
+    pool_port: u16,
+    worker_name: String,
+    cpu_threads: usize,
+    performance_preset: PerformancePreset,
+    compute_mode: ComputeMode,
+    gpu_enabled: bool,
+    gpu_device_id: Option<String>,
+    gpu_intensity_percent: u8,
+    enable_notifications: bool,
+    notify_on_jackpot: bool,
+    notify_on_share_accepted: bool,
+    notify_on_connection_error: bool,
+    heartbeat_interval: HeartbeatInterval,
+    notification_channel: NotificationChannel,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct DiagnosticSnapshot {
+    generated_at: String,
+    product_name: String,
+    app_version: String,
+    identifier: String,
+    flavor: String,
+    config: DiagnosticConfig,
+    gpu_devices: Vec<GpuDevice>,
+    log_path: String,
+    recent_log_lines: Vec<String>,
+    last_connection_error: Option<String>,
+}
+
 fn available_parallelism() -> usize {
     thread::available_parallelism()
         .map(|count| count.get())
@@ -170,12 +215,8 @@ fn recommended_cpu_threads() -> usize {
     available_parallelism().min(2)
 }
 
-fn default_port_for_pool(pool_host: &str) -> u16 {
-    if pool_host == "public-pool.io" {
-        21496
-    } else {
-        3333
-    }
+fn default_port_for_pool(_pool_host: &str) -> u16 {
+    DEFAULT_POOL_PORT
 }
 
 fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -220,8 +261,8 @@ fn load_config(app: &AppHandle) -> Result<AppConfig, String> {
         Ok(c) => c,
         Err(error) => {
             eprintln!("[Config] Failed to parse saved config: {error}. Using defaults.");
-            let default: AppConfig = serde_json::from_str(DEFAULT_CONFIG)
-                .expect("DEFAULT_CONFIG must always be valid");
+            let default: AppConfig =
+                serde_json::from_str(DEFAULT_CONFIG).expect("DEFAULT_CONFIG must always be valid");
             // Overwrite the broken config file with clean defaults
             let _ = write_config(app, &default);
             default
@@ -317,6 +358,13 @@ async fn run_gpu_benchmark(
 }
 
 #[tauri::command]
+async fn get_diagnostic_snapshot(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || build_diagnostic_snapshot(&app))
+        .await
+        .map_err(|_| "diagnostic snapshot task panicked".to_string())?
+}
+
+#[tauri::command]
 fn start_real_mining(
     app: AppHandle,
     state: State<'_, MiningController>,
@@ -381,6 +429,111 @@ fn set_window_always_on_top(window: WebviewWindow, always_on_top: bool) -> Resul
     window
         .set_always_on_top(always_on_top)
         .map_err(|error| format!("failed to update always-on-top setting: {error}"))
+}
+
+fn diagnostic_config(config: AppConfig) -> DiagnosticConfig {
+    DiagnosticConfig {
+        pool_host: config.pool_host,
+        pool_port: config.pool_port,
+        worker_name: config.worker_name,
+        cpu_threads: config.cpu_threads,
+        performance_preset: config.performance_preset,
+        compute_mode: config.compute_mode,
+        gpu_enabled: config.gpu_enabled,
+        gpu_device_id: config.gpu_device_id,
+        gpu_intensity_percent: config.gpu_intensity_percent,
+        enable_notifications: config.enable_notifications,
+        notify_on_jackpot: config.notify_on_jackpot,
+        notify_on_share_accepted: config.notify_on_share_accepted,
+        notify_on_connection_error: config.notify_on_connection_error,
+        heartbeat_interval: config.heartbeat_interval,
+        notification_channel: config.notification_channel,
+    }
+}
+
+fn read_recent_log_lines(
+    app: &AppHandle,
+    max_lines: usize,
+) -> Result<(String, Vec<String>), String> {
+    let log_dir = ensure_log_dir(app)?;
+    let log_path = log_dir.join("mining.log");
+    let log_path_string = log_path.display().to_string();
+
+    if !log_path.exists() {
+        return Ok((log_path_string, Vec::new()));
+    }
+
+    let contents = fs::read_to_string(&log_path)
+        .map_err(|error| format!("failed to read mining log for diagnostics: {error}"))?;
+    let mut lines = contents
+        .lines()
+        .rev()
+        .take(max_lines)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    lines.reverse();
+
+    Ok((log_path_string, lines))
+}
+
+fn sanitize_diagnostic_line(line: &str, config: &AppConfig) -> String {
+    let mut sanitized = line.to_owned();
+    for (value, replacement) in [
+        (config.btc_address.trim(), "[redacted btc address]"),
+        (config.webhook_url.trim(), "[redacted webhook url]"),
+    ] {
+        if !value.is_empty() {
+            sanitized = sanitized.replace(value, replacement);
+        }
+    }
+    sanitized
+}
+
+fn build_diagnostic_snapshot(app: &AppHandle) -> Result<String, String> {
+    let config = load_config(app)?;
+    let (log_path, recent_log_lines) = read_recent_log_lines(app, 80)?;
+    let recent_log_lines = recent_log_lines
+        .into_iter()
+        .map(|line| sanitize_diagnostic_line(&line, &config))
+        .collect::<Vec<_>>();
+    let last_connection_error = recent_log_lines
+        .iter()
+        .rev()
+        .find(|line| line.to_ascii_lowercase().contains("connection error"))
+        .cloned();
+    let identifier = app.config().identifier.clone();
+    let flavor = if identifier.contains("-dev") {
+        "development"
+    } else {
+        "stable"
+    };
+    let gpu_devices = gpu_miner::enumerate_gpu_devices()
+        .into_iter()
+        .map(|info| GpuDevice {
+            id: info.id,
+            name: info.name,
+            simulated: info.simulated,
+        })
+        .collect();
+    let snapshot = DiagnosticSnapshot {
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        product_name: app
+            .config()
+            .product_name
+            .clone()
+            .unwrap_or_else(|| "BTC Lottery Pet".into()),
+        app_version: env!("CARGO_PKG_VERSION").into(),
+        identifier,
+        flavor: flavor.into(),
+        config: diagnostic_config(config),
+        gpu_devices,
+        log_path,
+        recent_log_lines,
+        last_connection_error,
+    };
+
+    serde_json::to_string_pretty(&snapshot)
+        .map_err(|error| format!("failed to encode diagnostic snapshot: {error}"))
 }
 
 fn show_main_window(app: &AppHandle) {
@@ -461,8 +614,6 @@ fn tray_icon() -> Image<'static> {
     Image::new_owned(rgba, SIZE, SIZE)
 }
 
-
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -519,6 +670,7 @@ pub fn run() {
             get_system_info,
             get_gpu_devices,
             run_gpu_benchmark,
+            get_diagnostic_snapshot,
             start_real_mining,
             stop_real_mining,
             notify_jackpot,
@@ -560,6 +712,20 @@ mod tests {
     }
 
     #[test]
+    fn migrates_old_public_pool_default_port() {
+        let config = AppConfig {
+            pool_host: "public-pool.io".into(),
+            pool_port: 21496,
+            ..AppConfig::default()
+        };
+
+        let normalized = config.normalized();
+
+        assert_eq!(normalized.pool_host, "public-pool.io");
+        assert_eq!(normalized.pool_port, 3333);
+    }
+
+    #[test]
     fn compute_mode_controls_gpu_enabled_flag() {
         let config = AppConfig {
             compute_mode: ComputeMode::Gpu,
@@ -571,6 +737,7 @@ mod tests {
 
         assert_eq!(normalized.compute_mode, ComputeMode::Gpu);
         assert!(normalized.gpu_enabled);
+        assert_eq!(normalized.cpu_threads, 0);
     }
 
     #[test]
@@ -619,6 +786,45 @@ mod tests {
         assert_eq!(info.default_cpu_threads, 1);
         assert!(info.recommended_cpu_threads >= 1);
         assert!(info.recommended_cpu_threads <= info.available_parallelism);
+    }
+
+    #[test]
+    fn diagnostic_config_serialization_excludes_address_and_webhook() {
+        let config = AppConfig {
+            btc_address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa".into(),
+            webhook_url: "https://example.invalid/secret-hook".into(),
+            pool_host: "public-pool.io".into(),
+            worker_name: "desktop".into(),
+            ..AppConfig::default()
+        };
+
+        let serialized = serde_json::to_string(&super::diagnostic_config(config)).unwrap();
+
+        assert!(serialized.contains("public-pool.io"));
+        assert!(serialized.contains("desktop"));
+        assert!(!serialized.contains("btc_address"));
+        assert!(!serialized.contains("webhook_url"));
+        assert!(!serialized.contains("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"));
+        assert!(!serialized.contains("secret-hook"));
+    }
+
+    #[test]
+    fn diagnostic_log_lines_redact_address_and_webhook() {
+        let config = AppConfig {
+            btc_address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa".into(),
+            webhook_url: "https://example.invalid/secret-hook".into(),
+            ..AppConfig::default()
+        };
+
+        let sanitized = super::sanitize_diagnostic_line(
+            "connection error for 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa via https://example.invalid/secret-hook",
+            &config,
+        );
+
+        assert!(sanitized.contains("[redacted btc address]"));
+        assert!(sanitized.contains("[redacted webhook url]"));
+        assert!(!sanitized.contains("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"));
+        assert!(!sanitized.contains("secret-hook"));
     }
 
     #[test]

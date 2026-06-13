@@ -163,10 +163,14 @@ __kernel void sha256_mine(
 
     sha256_compress(state, w2);
 
-    // --- Compare hash against target (both big-endian, MSB first) ---
+    // --- Compare hash against target ---
+    // state[k] holds raw hash bytes [4k..4k+4] big-endian. Bitcoin treats the
+    // hash as a little-endian 256-bit integer, so the most-significant word is
+    // swap_bytes(state[7]) and the least-significant is swap_bytes(state[0]).
+    // Walk most- to least-significant against the big-endian target words.
     int is_valid = 1;
     for (int i = 0; i < 8; i++) {
-        uint h_word = state[i];
+        uint h_word = swap_bytes(state[7 - i]);
         uint t = params[12 + i];
         if (h_word < t) {
             break;

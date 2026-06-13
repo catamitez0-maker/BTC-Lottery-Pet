@@ -8,22 +8,18 @@ use crate::miner;
 
 const WEBHOOK_WARNING: &str = "[Warning] Webhook notification failed; check notification settings.";
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum NotificationChannel {
+    #[default]
     LocalWindowsToast,
     Webhook,
 }
 
-impl Default for NotificationChannel {
-    fn default() -> Self {
-        Self::LocalWindowsToast
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub(crate) enum HeartbeatInterval {
     #[serde(rename = "off")]
+    #[default]
     Off,
     #[serde(rename = "30min")]
     ThirtyMin,
@@ -31,12 +27,6 @@ pub(crate) enum HeartbeatInterval {
     OneHour,
     #[serde(rename = "6h")]
     SixHours,
-}
-
-impl Default for HeartbeatInterval {
-    fn default() -> Self {
-        Self::Off
-    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -230,6 +220,9 @@ fn heartbeat_actions(
 }
 
 fn run_actions(app: &AppHandle, actions: Vec<NotificationAction>) {
+    // Use this app instance's own identifier (stable vs. dev) as the toast
+    // AppUserModelID so notifications attribute to the correct installed app.
+    let app_id = app.config().identifier.clone();
     for action in actions {
         match action {
             NotificationAction::Local {
@@ -237,7 +230,7 @@ fn run_actions(app: &AppHandle, actions: Vec<NotificationAction>) {
                 body,
                 play_sound,
             } => {
-                if let Err(_error) = show_local_notification(&title, &body, play_sound) {
+                if let Err(_error) = show_local_notification(&app_id, &title, &body, play_sound) {
                     miner::log_message(app, "[Warning] Local notification failed.");
                 }
             }
@@ -253,25 +246,30 @@ fn run_actions(app: &AppHandle, actions: Vec<NotificationAction>) {
     }
 }
 
-fn show_local_notification(title: &str, body: &str, play_sound: bool) -> Result<(), String> {
+fn show_local_notification(
+    app_id: &str,
+    title: &str,
+    body: &str,
+    play_sound: bool,
+) -> Result<(), String> {
     #[cfg(windows)]
     {
         use winrt_notification::{Sound, Toast};
-        let mut toast = Toast::new("com.btc-lottery-pet.desktop")
-            .title(title)
-            .text1(body);
+        let mut toast = Toast::new(app_id).title(title).text1(body);
         if play_sound {
             toast = toast.sound(Some(Sound::SMS));
         } else {
             toast = toast.sound(None);
         }
-        toast.show().map_err(|error| format!("failed to show local notification: {:?}", error))?;
+        toast
+            .show()
+            .map_err(|error| format!("failed to show local notification: {:?}", error))?;
         Ok(())
     }
 
     #[cfg(not(windows))]
     {
-        let _ = (title, body, play_sound);
+        let _ = (app_id, title, body, play_sound);
         Ok(())
     }
 }
@@ -320,7 +318,7 @@ mod tests {
 
     fn jackpot_event() -> JackpotNotificationEvent {
         JackpotNotificationEvent {
-            pool: "public-pool.io:21496".into(),
+            pool: "public-pool.io:3333".into(),
             job_id: "job-1".into(),
             hash: "000000abc".into(),
             difficulty: 42.0,
@@ -393,7 +391,7 @@ mod tests {
             rejected_shares: 0,
             best_difficulty: 3.5,
             uptime: "00:10:00".into(),
-            pool: "public-pool.io:21496".into(),
+            pool: "public-pool.io:3333".into(),
         };
 
         assert!(matches!(

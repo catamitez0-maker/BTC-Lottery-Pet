@@ -167,11 +167,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     sha256_compress(&state, &w2);
 
-    // --- Compare hash against target (both big-endian, MSB first) ---
+    // --- Compare hash against target ---
+    // The double-SHA256 output word state[k] holds raw hash bytes [4k..4k+4] in
+    // big-endian form. Bitcoin compares the hash as a little-endian 256-bit
+    // integer, so its most-significant 32-bit word is swap_bytes(state[7]) and
+    // its least-significant is swap_bytes(state[0]). Walk most- to
+    // least-significant and compare against the big-endian target words.
     let target_offset = 12u;
     var is_valid = true;
     for (var i = 0u; i < 8u; i = i + 1u) {
-        let h = state[i];
+        let h = swap_bytes(state[7u - i]);
         let t = params[target_offset + i];
         if h < t {
             break;

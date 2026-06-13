@@ -6,91 +6,50 @@ import PetDisplay from "./components/PetDisplay";
 import MetricsGrid from "./components/MetricsGrid";
 import SettingsPanel from "./components/SettingsPanel";
 import LogTicker from "./components/LogTicker";
-
-export type PetStatus = "Sleeping" | "Connecting" | "Mining" | "Overdrive" | "Lucky Flash" | "Cooling Down" | "Connection Error" | "New Best Diff" | "Jackpot";
-export type ComputeMode = "cpu" | "gpu" | "hybrid";
-export type PerformancePreset = "eco" | "normal" | "turbo" | "custom";
-export type HeartbeatInterval = "off" | "30min" | "1h" | "6h";
-export type NotificationChannel = "local_windows_toast" | "webhook";
-
-export interface AppConfig {
-  btc_address: string;
-  pool_host: string;
-  pool_port: number;
-  worker_name: string;
-  cpu_threads: number;
-  performance_preset: PerformancePreset;
-  real_mining_enabled: boolean;
-  enable_notifications: boolean;
-  notify_on_jackpot: boolean;
-  notify_on_share_accepted: boolean;
-  notify_on_connection_error: boolean;
-  heartbeat_interval: HeartbeatInterval;
-  notification_channel: NotificationChannel;
-  webhook_url: string;
-  compute_mode: ComputeMode;
-  gpu_enabled: boolean;
-  gpu_device_id: string | null;
-  gpu_intensity_percent: number;
-}
-
-export interface SystemInfo {
-  available_parallelism: number;
-  default_cpu_threads: number;
-  recommended_cpu_threads: number;
-}
-
-export interface GpuDevice {
-  id: string;
-  name: string;
-  simulated: boolean;
-}
-
-export interface GpuBenchmarkResult {
-  device_id: string;
-  device_name: string;
-  simulated: boolean;
-  gpu_intensity_percent: number;
-  hashrate: number;
-  duration_ms: number;
-  note: string;
-}
-
-export interface SimulationStats {
-  status: PetStatus;
-  hashrate: number;
-  bestDifficulty: number;
-}
-
-export interface RealMiningStats {
-  hashrate: number;
-  accepted_shares: number;
-  rejected_shares: number;
-  best_difficulty: number;
-  current_job_id: string;
-  connection_status: string;
-  gpu_backend: string;
-  gpu_device_name: string;
-  gpu_dispatch_size: number;
-  gpu_dispatch_ms: number;
-  gpu_throttle_ms: number;
-}
-
-export interface BlockFoundEvent {
-  job_id: string;
-  nonce: string;
-  ntime: string;
-  extranonce2: string;
-  hash: string;
-  difficulty: number;
-  timestamp: string;
-  pool: string;
-}
+import {
+  formatDifficulty,
+  formatHashrate,
+  hasHardwareGpuDevice,
+  hasSoftwareGpuDevice,
+  isGpuComputeMode,
+  normalizeAppConfig,
+  presetPort,
+  realMiningStartError,
+  sanitizeGpuDeviceId,
+  threadsForPreset,
+} from "./miningLogic";
+import type {
+  AppConfig,
+  BlockFoundEvent,
+  ComputeMode,
+  GpuBenchmarkResult,
+  GpuDevice,
+  HeartbeatInterval,
+  PetStatus,
+  PerformancePreset,
+  RealMiningStats,
+  SimulationStats,
+  SystemInfo,
+} from "./miningLogic";
+export type {
+  AppConfig,
+  BlockFoundEvent,
+  ComputeMode,
+  GpuBenchmarkResult,
+  GpuDevice,
+  HeartbeatInterval,
+  NotificationChannel,
+  PetStatus,
+  PerformancePreset,
+  RealMiningStats,
+  SimulationStats,
+  SystemInfo,
+} from "./miningLogic";
 
 const fallbackConfig: AppConfig = {
   btc_address: "",
   pool_host: "public-pool.io",
-  pool_port: 21496,
+  pool_port: 3333,
   worker_name: "btc-lottery-pet",
   cpu_threads: 1,
   performance_preset: "eco",
@@ -139,18 +98,6 @@ function formatError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function presetPort(poolHost: string, currentPort: number) {
-  if (poolHost === "public-pool.io") {
-    return 21496;
-  }
-
-  if (poolHost === "pool.nerdminers.org") {
-    return 3333;
-  }
-
-  return currentPort;
-}
-
 function formatUptime(seconds: number) {
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
@@ -159,24 +106,6 @@ function formatUptime(seconds: number) {
   return [hours, minutes, remainingSeconds]
     .map((value) => value.toString().padStart(2, "0"))
     .join(":");
-}
-
-export function formatDifficulty(value: number) {
-  return value < 1_000
-    ? value.toFixed(4)
-    : Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
-}
-
-export function formatHashrate(hashrate: number) {
-  if (hashrate >= 1_000_000) {
-    return `${(hashrate / 1_000_000).toFixed(2)} MH/s`;
-  }
-
-  if (hashrate >= 1_000) {
-    return `${(hashrate / 1_000).toFixed(2)} KH/s`;
-  }
-
-  return `${hashrate.toFixed(0)} H/s`;
 }
 
 function formatDispatchSize(dispatchSize: number) {
@@ -188,55 +117,6 @@ function formatDispatchSize(dispatchSize: number) {
     notation: "compact",
     maximumFractionDigits: 1,
   }).format(dispatchSize);
-}
-
-export function threadsForPreset(
-  preset: PerformancePreset,
-  systemInfo: SystemInfo,
-  customThreads: number,
-  gpuOnly = false,
-) {
-  if (gpuOnly) {
-    return 0;
-  }
-
-  const availableThreads = Math.max(1, systemInfo.available_parallelism);
-  const recommendedThreads = Math.min(
-    availableThreads,
-    Math.max(1, systemInfo.recommended_cpu_threads),
-  );
-
-  switch (preset) {
-    case "eco":
-      return 1;
-    case "normal":
-      return recommendedThreads;
-    case "turbo":
-      return availableThreads;
-    case "custom":
-      return Math.min(Math.max(1, customThreads), availableThreads);
-  }
-}
-
-export function isGpuComputeMode(mode: ComputeMode) {
-  return mode === "gpu" || mode === "hybrid";
-}
-
-export function hasHardwareGpuDevice(devices: GpuDevice[]) {
-  return devices.some((device) => device.id !== "auto" && !device.simulated);
-}
-
-export function hasSoftwareGpuDevice(devices: GpuDevice[]) {
-  return devices.some((device) => device.id !== "auto" && device.simulated);
-}
-
-export function sanitizeGpuDeviceId(deviceId: string | null, devices: GpuDevice[]) {
-  if (!deviceId || deviceId === "auto") {
-    return null;
-  }
-
-  const device = devices.find((candidate) => candidate.id === deviceId);
-  return device && !device.simulated ? deviceId : null;
 }
 
 function performancePresetLabel(preset: PerformancePreset) {
@@ -391,6 +271,16 @@ function App() {
     let unmounted = false;
 
     listen<RealMiningStats>("mining-stats", (event) => {
+      if (
+        event.payload.connection_status === "GPU unavailable" &&
+        isMiningRef.current &&
+        realModeEnabledRef.current
+      ) {
+        isMiningRef.current = false;
+        setIsMining(false);
+        setErrorMessage("GPU mining unavailable. Check GPU drivers or switch Compute Mode.");
+      }
+
       setRealStats((current) => {
         if (!isMiningRef.current || !realModeEnabledRef.current) {
           return event.payload;
@@ -809,8 +699,9 @@ function App() {
       return;
     }
 
-    if (!config.btc_address) {
-      setErrorMessage("Add a BTC address before starting real mining.");
+    const startError = realMiningStartError(config, gpuDevices, runningInTauri);
+    if (startError) {
+      setErrorMessage(startError);
       setShowSettings(true);
       return;
     }
@@ -919,28 +810,7 @@ function App() {
   const saveSettings = async () => {
     setErrorMessage(null);
 
-    const performancePreset = draftConfig.performance_preset;
-    const isGpuMode = isGpuComputeMode(draftConfig.compute_mode);
-    const isGpuOnly = draftConfig.compute_mode === "gpu";
-    const cpuThreads = threadsForPreset(
-      performancePreset,
-      systemInfo,
-      Number(draftConfig.cpu_threads),
-      isGpuOnly,
-    );
-    const gpuDeviceId = isGpuMode
-      ? sanitizeGpuDeviceId(draftConfig.gpu_device_id, gpuDevices)
-      : null;
-
-    const settings: AppConfig = {
-      ...draftConfig,
-      pool_port: Number(draftConfig.pool_port),
-      cpu_threads: cpuThreads,
-      performance_preset: performancePreset,
-      real_mining_enabled: false,
-      gpu_enabled: isGpuMode,
-      gpu_device_id: gpuDeviceId,
-    };
+    const settings = normalizeAppConfig(draftConfig, systemInfo, gpuDevices);
 
     try {
       const savedSettings = await invoke<AppConfig>("save_config", { config: settings });
@@ -1015,6 +885,22 @@ function App() {
         setErrorMessage(`Could not copy log path: ${formatError(error)}`);
       } else {
         setErrorMessage("Log path copy is available in the desktop app.");
+      }
+    }
+  };
+
+  const copyDiagnostics = async () => {
+    setErrorMessage(null);
+
+    try {
+      const snapshot = await invoke<string>("get_diagnostic_snapshot");
+      await navigator.clipboard.writeText(snapshot);
+      setLatestLog("[System] Diagnostic snapshot copied to clipboard");
+    } catch (error) {
+      if (runningInTauri) {
+        setErrorMessage(`Could not copy diagnostics: ${formatError(error)}`);
+      } else {
+        setErrorMessage("Diagnostics export is available in the desktop app.");
       }
     }
   };
@@ -1221,6 +1107,7 @@ function App() {
         latestLog={latestLog}
         openLogs={openLogs}
         copyLogPath={copyLogPath}
+        copyDiagnostics={copyDiagnostics}
       />
 
       <footer>

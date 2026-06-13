@@ -25,22 +25,19 @@ const GPU_MAX_THROTTLE_SLEEP: Duration = Duration::from_secs(10);
 
 // SHA-256 round constants
 const K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-    0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-    0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-    0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-    0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-    0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-    0xc67178f2,
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
 // SHA-256 initial hash values
 const H_INIT: [u32; 8] = [
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-    0x5be0cd19,
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
 /// Computes the SHA-256 intermediate state after processing one 64-byte block.
@@ -154,9 +151,7 @@ fn gpu_throttle_sleep_duration(intensity_percent: u8, active_ms: u64) -> Duratio
         return Duration::ZERO;
     }
 
-    let sleep_ms = (active_ms as u128)
-        .saturating_mul(100 - duty_percent)
-        / duty_percent;
+    let sleep_ms = (active_ms as u128).saturating_mul(100 - duty_percent) / duty_percent;
     Duration::from_millis((sleep_ms.min(GPU_MAX_THROTTLE_SLEEP.as_millis())) as u64)
 }
 
@@ -169,6 +164,10 @@ fn sleep_until_stopped(stop: &std::sync::atomic::AtomicBool, duration: Duration)
         }
         std::thread::sleep((deadline - now).min(Duration::from_millis(50)));
     }
+}
+
+fn gpu_failure_should_stop_session(worker_index: usize, total_workers: usize) -> bool {
+    worker_index == 0 && total_workers == 1
 }
 
 /// Information about an available GPU device.
@@ -189,8 +188,8 @@ fn is_wgpu_software_adapter(info: &wgpu::AdapterInfo) -> bool {
         info.device_type,
         wgpu::DeviceType::Cpu | wgpu::DeviceType::Other
     ) || info.name.to_ascii_lowercase().contains("warp")
-      || info.name.to_ascii_lowercase().contains("software")
-      || info.name.to_ascii_lowercase().contains("llvmpipe")
+        || info.name.to_ascii_lowercase().contains("software")
+        || info.name.to_ascii_lowercase().contains("llvmpipe")
 }
 
 fn describe_batch(batch_size: u32) -> String {
@@ -242,11 +241,13 @@ pub(crate) fn enumerate_gpu_devices() -> Vec<GpuDeviceInfo> {
     // If enumerate_adapters found nothing, try request_adapter as fallback
     if adapters.is_empty() {
         eprintln!("[GPU] enumerate_adapters empty, trying request_adapter fallback...");
-        if let Some(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        })) {
+        if let Some(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            }))
+        {
             let info = adapter.get_info();
             let simulated = is_wgpu_software_adapter(&info);
             eprintln!(
@@ -291,9 +292,7 @@ fn enumerate_opencl_devices() -> Result<Vec<GpuDeviceInfo>, String> {
             .name()
             .unwrap_or_else(|_| "Unknown Platform".into());
 
-        let gpu_devices = platform
-            .get_devices(CL_DEVICE_TYPE_GPU)
-            .unwrap_or_default();
+        let gpu_devices = platform.get_devices(CL_DEVICE_TYPE_GPU).unwrap_or_default();
 
         for (dev_idx, &device_id) in gpu_devices.iter().enumerate() {
             let device = Device::new(device_id);
@@ -341,7 +340,7 @@ pub(crate) struct GpuMiner {
 impl GpuMiner {
     /// Creates a new GPU miner. Selects the adapter by `device_id` (e.g. "gpu-0")
     /// or auto-selects the best available GPU if `device_id` is None or "auto".
-    /// `intensity_percent` (1-100) controls the batch size from 1M to 16M nonces.
+    /// `intensity_percent` (1-100) controls the batch size from 1M to 4M nonces.
     ///
     /// In auto mode, software renderers like WARP are rejected so that
     /// `create_gpu_backend()` can fall back to OpenCL.
@@ -364,12 +363,13 @@ impl GpuMiner {
                 .ok_or_else(|| format!("GPU device {id} not found"))?
         } else {
             // Auto-select: prefer high-performance GPU
-            let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-            }))
-            .ok_or_else(|| "no compatible GPU adapter found".to_string())?;
+            let adapter =
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                }))
+                .ok_or_else(|| "no compatible GPU adapter found".to_string())?;
 
             // Reject software renderers (WARP, llvmpipe) in auto mode —
             // they are slower than CPU mining. Let create_gpu_backend fall back to OpenCL.
@@ -472,7 +472,9 @@ impl GpuMiner {
         let results_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("results"),
             size: results_size as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -530,7 +532,8 @@ impl GpuMiner {
         params_data[8..11].copy_from_slice(tail);
         params_data[11] = nonce_start;
         params_data[12..20].copy_from_slice(target);
-        self.queue.write_buffer(&self.params_buffer, 0, &u32_slice_to_bytes(&params_data));
+        self.queue
+            .write_buffer(&self.params_buffer, 0, &u32_slice_to_bytes(&params_data));
 
         // Zero the results buffer via a clear command
         let results_size = 257 * 4;
@@ -554,7 +557,13 @@ impl GpuMiner {
             pass.dispatch_workgroups(dispatch_size / 256, 1, 1);
         }
 
-        encoder.copy_buffer_to_buffer(&self.results_buffer, 0, &self.staging_buffer, 0, results_size as u64);
+        encoder.copy_buffer_to_buffer(
+            &self.results_buffer,
+            0,
+            &self.staging_buffer,
+            0,
+            results_size as u64,
+        );
         self.queue.submit(std::iter::once(encoder.finish()));
 
         // Wait for GPU to finish with timeout (prevents infinite hang on driver stall)
@@ -571,7 +580,10 @@ impl GpuMiner {
         while Instant::now() < poll_deadline {
             self.device.poll(wgpu::Maintain::Poll);
             match receiver.try_recv() {
-                Ok(Ok(())) => { gpu_done = true; break; }
+                Ok(Ok(())) => {
+                    gpu_done = true;
+                    break;
+                }
                 Ok(Err(_)) => {
                     self.staging_buffer.unmap();
                     return Err("GPU mapping failed (device lost)".to_string());
@@ -624,7 +636,10 @@ fn u32_slice_to_bytes(data: &[u32]) -> Vec<u8> {
 /// Safe conversion from &[u8] to Vec<u32> without UB.
 /// Uses native-endian byte reading — no alignment requirement.
 fn bytes_to_u32_vec(data: &[u8]) -> Vec<u32> {
-    assert!(data.len() % 4 == 0, "byte slice length not a multiple of 4");
+    assert!(
+        data.len().is_multiple_of(4),
+        "byte slice length not a multiple of 4"
+    );
     data.chunks_exact(4)
         .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect()
@@ -652,7 +667,7 @@ impl OpenClMiner {
     ///
     /// `device_index` selects a specific device by `(platform_idx, device_idx)` pair.
     /// If `None`, auto-selects the first available GPU across all platforms.
-    /// `intensity_percent` (1-100) controls batch size from 1M to 16M nonces.
+    /// `intensity_percent` (1-100) controls batch size from 1M to 4M nonces.
     pub(crate) fn new(
         device_index: Option<(usize, usize)>,
         intensity_percent: u8,
@@ -695,12 +710,9 @@ impl OpenClMiner {
         let context = Context::from_device(&device)
             .map_err(|e| format!("OpenCL context creation failed: {e}"))?;
 
-        let queue = CommandQueue::create_default_with_properties(
-            &context,
-            CL_QUEUE_PROFILING_ENABLE,
-            0,
-        )
-        .map_err(|e| format!("OpenCL command queue creation failed: {e}"))?;
+        let queue =
+            CommandQueue::create_default_with_properties(&context, CL_QUEUE_PROFILING_ENABLE, 0)
+                .map_err(|e| format!("OpenCL command queue creation failed: {e}"))?;
 
         let kernel_source = include_str!("sha256_mining.cl");
         let program = Program::create_and_build_from_source(&context, kernel_source, "")
@@ -718,22 +730,12 @@ impl OpenClMiner {
 
         // Pre-allocate OpenCL buffers (reused across all mine_batch calls)
         let params_buffer = unsafe {
-            Buffer::<cl_uint>::create(
-                &context,
-                CL_MEM_READ_ONLY,
-                20,
-                std::ptr::null_mut(),
-            )
+            Buffer::<cl_uint>::create(&context, CL_MEM_READ_ONLY, 20, std::ptr::null_mut())
         }
         .map_err(|e| format!("OpenCL params buffer creation failed: {e}"))?;
 
         let results_buffer = unsafe {
-            Buffer::<cl_uint>::create(
-                &context,
-                CL_MEM_READ_WRITE,
-                257,
-                std::ptr::null_mut(),
-            )
+            Buffer::<cl_uint>::create(&context, CL_MEM_READ_WRITE, 257, std::ptr::null_mut())
         }
         .map_err(|e| format!("OpenCL results buffer creation failed: {e}"))?;
 
@@ -865,8 +867,12 @@ impl GpuBackend {
         dispatch_size: u32,
     ) -> Result<Vec<u32>, String> {
         match self {
-            GpuBackend::Wgpu(gpu) => gpu.mine_batch(midstate, tail, nonce_start, target, dispatch_size),
-            GpuBackend::OpenCl(cl) => cl.mine_batch(midstate, tail, nonce_start, target, dispatch_size as usize),
+            GpuBackend::Wgpu(gpu) => {
+                gpu.mine_batch(midstate, tail, nonce_start, target, dispatch_size)
+            }
+            GpuBackend::OpenCl(cl) => {
+                cl.mine_batch(midstate, tail, nonce_start, target, dispatch_size as usize)
+            }
         }
     }
 
@@ -956,13 +962,12 @@ pub(crate) fn create_gpu_backend(
     }
 }
 
-
-
 /// Main GPU hashing loop. Runs in a dedicated thread.
 ///
 /// This is the GPU equivalent of `hash_loop` in miner.rs. It continuously pulls
 /// the latest job from shared state, dispatches GPU batches, verifies found
 /// nonces on the CPU, and submits shares.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn gpu_hash_loop(
     shared: Arc<SharedMiningState>,
     share_sender: SyncSender<ShareSubmission>,
@@ -984,15 +989,28 @@ pub(crate) fn gpu_hash_loop(
                 &app,
                 &format!(
                     "GPU miner initialized [{}]: {} (batch_size={})",
-                    backend,
-                    device_name,
-                    batch_size
+                    backend, device_name, batch_size
                 ),
             );
             gpu
         }
         Err(error) => {
-            log_message(&app, &format!("GPU init failed: {error}"));
+            // Surface the failure in the detail-mode GPU fields so the user is not
+            // left looking at a "Mining" status with no GPU work happening (this is
+            // especially important in GPU-only mode, where no CPU workers run).
+            shared.set_gpu_runtime("unavailable", "check GPU drivers / compute mode");
+            if gpu_failure_should_stop_session(worker_index, total_workers) {
+                shared.set_connection_status("GPU unavailable");
+                miner::emit_stats(&app, &shared, 0.0);
+                shared.stop.store(true, Ordering::Release);
+            }
+            log_message(
+                &app,
+                &format!(
+                    "[Warning] GPU init failed: {error}. GPU mining is disabled for this session; \
+                     update GPU drivers or switch Compute Mode."
+                ),
+            );
             return;
         }
     };
@@ -1053,10 +1071,18 @@ pub(crate) fn gpu_hash_loop(
                 // Clamp dispatch_size to prevent GPU threads from overflowing u32 nonce space
                 let remaining = (u32::MAX - nonce_start).saturating_add(1);
                 let dispatch_size = adaptive_batch.min(remaining);
-                if dispatch_size == 0 { break; }
+                if dispatch_size == 0 {
+                    break;
+                }
 
                 let dispatch_start = Instant::now();
-                let found_nonces = match gpu.mine_batch(&midstate, &tail, nonce_start, &target, dispatch_size) {
+                let found_nonces = match gpu.mine_batch(
+                    &midstate,
+                    &tail,
+                    nonce_start,
+                    &target,
+                    dispatch_size,
+                ) {
                     Ok(nonces) => nonces,
                     Err(err) => {
                         log_message(
@@ -1083,14 +1109,18 @@ pub(crate) fn gpu_hash_loop(
                                 continue; // retry this batch
                             }
                             Err(reinit_err) => {
-                                log_message(&app, &format!("GPU re-initialization failed: {reinit_err}"));
+                                log_message(
+                                    &app,
+                                    &format!("GPU re-initialization failed: {reinit_err}"),
+                                );
                                 return;
                             }
                         }
                     }
                 };
                 let dispatch_ms = dispatch_start.elapsed().as_millis() as u64;
-                let throttle_sleep = gpu_throttle_sleep_duration(gpu_intensity_percent, dispatch_ms);
+                let throttle_sleep =
+                    gpu_throttle_sleep_duration(gpu_intensity_percent, dispatch_ms);
                 let throttle_ms = throttle_sleep.as_millis() as u64;
                 shared.set_gpu_dispatch_stats(dispatch_size as u64, dispatch_ms, throttle_ms);
 
@@ -1196,7 +1226,7 @@ pub(crate) fn gpu_hash_loop(
             extranonce_cycles += 1;
 
             // Log diagnostic info periodically (every 10 extranonce cycles)
-            if extranonce_cycles % 10 == 0 {
+            if extranonce_cycles.is_multiple_of(10) {
                 log_message(
                     &app,
                     &format!(
@@ -1255,7 +1285,9 @@ pub(crate) fn run_gpu_benchmark(
                 return Err(format!("GPU benchmark error: {e}"));
             }
             Err(_) => {
-                return Err("GPU driver crashed during benchmark (possible driver incompatibility)".into());
+                return Err(
+                    "GPU driver crashed during benchmark (possible driver incompatibility)".into(),
+                );
             }
         }
 
@@ -1313,8 +1345,8 @@ mod tests {
         // Known SHA-256 midstate for 64 zero bytes:
         // This is SHA-256 compress(H_INIT, parse_block(0x00 * 64))
         let expected: [u32; 8] = [
-            0xda5698be, 0x17b9b469, 0x62335799, 0x779fbeca,
-            0x8ce5d491, 0xc0d26243, 0xbafef9ea, 0x1837a9d8,
+            0xda5698be, 0x17b9b469, 0x62335799, 0x779fbeca, 0x8ce5d491, 0xc0d26243, 0xbafef9ea,
+            0x1837a9d8,
         ];
         assert_eq!(midstate, expected);
     }
@@ -1340,11 +1372,88 @@ mod tests {
         assert!(target[2..].iter().all(|word| *word == 0));
     }
 
+    /// Mirrors the WGSL/OpenCL kernels' hash-vs-target comparison in pure Rust
+    /// so the endianness convention is locked by a host-side regression test.
+    /// `state[k]` is the big-endian u32 of raw hash bytes [4k..4k+4], exactly as
+    /// the kernels reconstruct it; the most-significant word of the little-endian
+    /// Bitcoin hash value is therefore `swap_bytes(state[7])`.
+    fn gpu_meets_target(hash: &[u8; 32], target_words: &[u32; 8]) -> bool {
+        let mut state = [0u32; 8];
+        for k in 0..8 {
+            state[k] = u32::from_be_bytes([
+                hash[4 * k],
+                hash[4 * k + 1],
+                hash[4 * k + 2],
+                hash[4 * k + 3],
+            ]);
+        }
+        for i in 0..8 {
+            let h = state[7 - i].swap_bytes();
+            let t = target_words[i];
+            if h < t {
+                return true;
+            }
+            if h > t {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn genesis_block_header() -> Vec<u8> {
+        let hex = "01000000".to_string()
+            + &"00".repeat(32)
+            + "3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a"
+            + "29ab5f49"
+            + "ffff001d"
+            + "1dac2b7c";
+        let header = hex::decode(hex).unwrap();
+        assert_eq!(header.len(), 80);
+        header
+    }
+
+    #[test]
+    fn gpu_comparison_uses_bitcoin_endianness() {
+        // The Bitcoin genesis block (whose hash difficulty is ~2.5k) must clear a
+        // diff-1 target under the kernel comparison convention. Before the
+        // endianness fix the kernels checked the wrong end of the hash via
+        // `state[i]` and rejected it, so this test pins the corrected ordering.
+        let hash = miner::double_sha256(&genesis_block_header());
+
+        // Sanity: the CPU path (the reference) agrees the hash clears diff 1.
+        assert!(miner::difficulty_from_hash(&hash) >= 1.0);
+
+        // The GPU share filter at difficulty 1.0 must flag the genesis hash.
+        assert!(gpu_meets_target(&hash, &difficulty_to_target_words(1.0)));
+
+        // An all-0xFF hash clears nothing.
+        assert!(!gpu_meets_target(
+            &[0xFF; 32],
+            &difficulty_to_target_words(1.0)
+        ));
+
+        // The genesis hash must NOT clear a target far harder than it is.
+        assert!(!gpu_meets_target(&hash, &difficulty_to_target_words(1e9)));
+    }
+
     #[test]
     fn gpu_throttle_sleep_tracks_intensity_duty_cycle() {
         assert_eq!(gpu_throttle_sleep_duration(100, 250), Duration::ZERO);
-        assert_eq!(gpu_throttle_sleep_duration(50, 250), Duration::from_millis(250));
-        assert_eq!(gpu_throttle_sleep_duration(10, 100), Duration::from_millis(900));
+        assert_eq!(
+            gpu_throttle_sleep_duration(50, 250),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            gpu_throttle_sleep_duration(10, 100),
+            Duration::from_millis(900)
+        );
+    }
+
+    #[test]
+    fn gpu_only_init_failure_stops_session() {
+        assert!(gpu_failure_should_stop_session(0, 1));
+        assert!(!gpu_failure_should_stop_session(1, 2));
+        assert!(!gpu_failure_should_stop_session(0, 2));
     }
 
     #[test]

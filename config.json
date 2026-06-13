@@ -1,7 +1,7 @@
 {
   "btc_address": "",
   "pool_host": "public-pool.io",
-  "pool_port": 21496,
+  "pool_port": 3333,
   "worker_name": "btc-lottery-pet",
   "cpu_threads": 1,
   "performance_preset": "eco",

@@ -32,6 +32,8 @@ This project does not promise or guarantee any financial return.
   `mining.log.1`) plus `found_block.json` for a block candidate event
 - Optional one-way notifications for Jackpot, share accepted, connection error,
   and coarse heartbeat status via local Windows notification or webhook
+- Detail Mode diagnostic snapshot copy with app version, sanitized config,
+  GPU list, log path, recent log lines, and the latest connection error
 
 BTC Lottery Pet does not hide its process, enable itself at Windows startup,
 accept remote-control commands, or start mining automatically.
@@ -64,7 +66,8 @@ The settings panel includes:
 
 | Pool host | Port | Notes |
 | --- | ---: | --- |
-| `public-pool.io` | `21496` | Default. Shared Public Pool low-difficulty endpoint listed by the NerdMiner project. |
+| `public-pool.io` | `3333` | Default. Shared Public Pool low-difficulty endpoint listed by the NerdMiner project. |
+| `pool.nerdminer.io` | `3333` | NerdMiner community pool endpoint. This client can use it as a plain Stratum v1 fallback after you review its current terms and status. |
 | `pool.nerdminers.org` | `3333` | Official NerdMiner community pool. Its operator documents hardware restrictions, so verify compatibility before using this desktop client. |
 
 The presets are convenience defaults, not availability guarantees. The pool
@@ -110,7 +113,7 @@ does not include the BTC address, private keys, seed phrases, or any remote
 control data.
 
 To keep an untrusted or misconfigured pool from consuming unbounded local
-resources, the client caps each Stratum line at 1 MiB, keeps at most 128
+resources, the client caps each Stratum line at 64 KiB, keeps at most 128
 unanswered share submissions, and sends at most 16 queued shares before
 returning to socket reads. It also rejects non-positive and pathologically low
 share difficulties.
@@ -127,6 +130,12 @@ Notifications are one-way only. Local Windows notifications and webhooks can be
 triggered by app events, but there is no remote command polling, remote control,
 or inbound webhook listener.
 
+The Detail Mode `COPY DIAG` action copies a local diagnostic JSON snapshot to
+the clipboard. It is meant for troubleshooting and intentionally excludes the
+BTC address and webhook URL. The snapshot includes the app version,
+configuration summary, GPU device list, log path, recent mining log lines, and
+latest connection error when one is present.
+
 ## Configuration
 
 The repository-level [`config.json`](./config.json) contains defaults:
@@ -135,7 +144,7 @@ The repository-level [`config.json`](./config.json) contains defaults:
 {
   "btc_address": "",
   "pool_host": "public-pool.io",
-  "pool_port": 21496,
+  "pool_port": 3333,
   "worker_name": "btc-lottery-pet",
   "cpu_threads": 1,
   "performance_preset": "eco",
@@ -159,9 +168,10 @@ configuration directory. Existing Phase 1 config files are normalized when
 loaded. `performance_preset` and `cpu_threads` are the enforced real-mining CPU
 limits. The default `eco` preset uses one CPU thread.
 
-Upgrades preserve an existing saved pool selection. If you previously ran the
-app with the older `pool.nerdminers.org` default, review the settings panel and
-switch pools manually when appropriate.
+Upgrades preserve existing custom pool selections, but migrate the old
+`public-pool.io:21496` default to `public-pool.io:3333`. If a pool rejects the
+client after connecting, review the settings panel and switch pools manually
+when appropriate.
 
 For safety, `real_mining_enabled` remains `false` in saved configuration.
 Enabling real mode is a session-only UI action. Every app launch starts in
@@ -312,8 +322,9 @@ to show the window again. Use `Quit` from the tray menu to exit the app.
 
 The tray `Open Logs` item and the Detail Mode `OPEN LOGS` button open the
 app-specific log folder. The Detail Mode `COPY LOG PATH` button copies that
-local log folder path. The regular mining log is `mining.log`; if a block
-candidate is detected, the event is also saved as `found_block.json`.
+local log folder path, and `COPY DIAG` copies a sanitized diagnostic snapshot.
+The regular mining log is `mining.log`; if a block candidate is detected, the
+event is also saved as `found_block.json`.
 
 ## Run and build commands
 
@@ -323,6 +334,7 @@ Use exactly one of these commands for the task at hand:
 | --- | --- |
 | `npm run tauri:dev` | Recommended development desktop app. Starts Vite for Tauri and opens one `BTC Lottery Pet Dev` desktop window. It does not ask Vite to open a browser. |
 | `npm run dev` | Browser-only React preview at `http://localhost:1420`. It does not launch Tauri. |
+| `npm run test:frontend` | Runs the no-dependency Node unit tests for frontend mining configuration helpers. |
 | `npm run tauri:build` | Stable Windows NSIS package build for `BTC Lottery Pet`. |
 
 Release builds use the Windows GUI subsystem, so the packaged app should not
@@ -376,11 +388,14 @@ Its Rust outputs are written under `src-tauri\target-dev`.
 Before each release, verify:
 
 1. `cargo test --manifest-path src-tauri\Cargo.toml` passes, including the
-   compact `nbits` target and block-candidate event tests.
-2. `npm run build` passes TypeScript and Vite production builds.
-3. `npm run tauri:build` produces the stable Windows executable and installer.
-4. The release executable uses the Windows GUI subsystem and should not open an
+   compact `nbits` target, mock Stratum pool, and block-candidate event tests.
+2. `cargo clippy --manifest-path src-tauri\Cargo.toml -- -D warnings` passes.
+3. `npm run test:frontend` passes the frontend mining configuration helper
+   tests.
+4. `npm run build` passes TypeScript and Vite production builds.
+5. `npm run tauri:build` produces the stable Windows executable and installer.
+6. The release executable uses the Windows GUI subsystem and should not open an
    extra black console window. The development command `npm run tauri:dev` can
    still keep its development terminal open; that is expected.
-5. Detail Mode `OPEN LOGS` opens the local app log folder, and
-   `COPY LOG PATH` copies that folder path.
+7. Detail Mode `OPEN LOGS` opens the local app log folder, `COPY LOG PATH`
+   copies that folder path, and `COPY DIAG` copies sanitized diagnostics.

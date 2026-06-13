@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --configLoader runner",
     "build": "tsc && vite build --configLoader runner",
+    "test:frontend": "tsc -p tsconfig.frontend-test.json && node --test test/miningLogic.test.mjs",
     "preview": "vite preview --configLoader runner",
     "tauri": "tauri",
     "tauri:dev": "set \"CARGO_TARGET_DIR=%CD%\\src-tauri\\target-dev\" && tauri dev --config src-tauri/tauri.dev.conf.json",

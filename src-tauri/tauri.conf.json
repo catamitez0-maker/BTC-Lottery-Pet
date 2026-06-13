@@ -25,7 +25,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost https://mempool.space https://blockstream.info https://blockchain.info; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {

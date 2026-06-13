@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": false,
+    "emitDeclarationOnly": false,
+    "noEmit": false,
+    "outDir": ".test-dist",
+    "rootDir": "src"
+  },
+  "include": ["src/miningLogic.ts"]
+}

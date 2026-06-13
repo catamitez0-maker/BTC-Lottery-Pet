@@ -109,6 +109,7 @@ export default function SettingsPanel({
             />
             <datalist id="pool-presets">
               <option value="public-pool.io" />
+              <option value="pool.nerdminer.io" />
               <option value="pool.nerdminers.org" />
             </datalist>
           </label>
