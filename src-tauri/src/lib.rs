@@ -21,6 +21,7 @@ const DEFAULT_CONFIG: &str = include_str!("../../config.json");
 const DEFAULT_POOL_HOST: &str = "public-pool.io";
 const DEFAULT_POOL_PORT: u16 = 3333;
 const OLD_PUBLIC_POOL_PORT: u16 = 21496;
+const DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -170,6 +171,7 @@ struct GpuBenchmarkResult {
     hashrate: f64,
     duration_ms: u64,
     note: String,
+    generated_at: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -193,6 +195,7 @@ struct DiagnosticConfig {
 
 #[derive(Clone, Debug, Serialize)]
 struct DiagnosticSnapshot {
+    diagnostic_schema_version: u32,
     generated_at: String,
     product_name: String,
     app_version: String,
@@ -203,6 +206,7 @@ struct DiagnosticSnapshot {
     log_path: String,
     recent_log_lines: Vec<String>,
     last_connection_error: Option<String>,
+    redacted_fields: Vec<String>,
 }
 
 fn available_parallelism() -> usize {
@@ -323,6 +327,8 @@ async fn run_gpu_benchmark(
     gpu_intensity_percent: u8,
 ) -> GpuBenchmarkResult {
     let intensity = gpu_intensity_percent.clamp(1, 100);
+    let generated_at = chrono::Utc::now().to_rfc3339();
+    let fallback_generated_at = generated_at.clone();
     tauri::async_runtime::spawn_blocking(move || {
         match gpu_miner::run_gpu_benchmark(gpu_device_id.as_deref(), intensity) {
             Ok(info) => GpuBenchmarkResult {
@@ -333,6 +339,7 @@ async fn run_gpu_benchmark(
                 hashrate: info.hashrate,
                 duration_ms: info.duration_ms,
                 note: info.note,
+                generated_at: generated_at.clone(),
             },
             Err(error) => GpuBenchmarkResult {
                 device_id: gpu_device_id.unwrap_or_else(|| "auto".into()),
@@ -342,6 +349,7 @@ async fn run_gpu_benchmark(
                 hashrate: 0.0,
                 duration_ms: 0,
                 note: format!("GPU benchmark failed: {error}"),
+                generated_at: generated_at.clone(),
             },
         }
     })
@@ -354,6 +362,7 @@ async fn run_gpu_benchmark(
         hashrate: 0.0,
         duration_ms: 0,
         note: "GPU benchmark task panicked".into(),
+        generated_at: fallback_generated_at,
     })
 }
 
@@ -362,6 +371,21 @@ async fn get_diagnostic_snapshot(app: AppHandle) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || build_diagnostic_snapshot(&app))
         .await
         .map_err(|_| "diagnostic snapshot task panicked".to_string())?
+}
+
+#[tauri::command]
+async fn save_diagnostic_snapshot(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let snapshot = build_diagnostic_snapshot(&app)?;
+        let log_dir = ensure_log_dir(&app)?;
+        let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+        let path = log_dir.join(format!("diagnostic-{timestamp}.json"));
+        fs::write(&path, format!("{snapshot}\n"))
+            .map_err(|error| format!("failed to save diagnostic snapshot: {error}"))?;
+        Ok(path.display().to_string())
+    })
+    .await
+    .map_err(|_| "diagnostic snapshot save task panicked".to_string())?
 }
 
 #[tauri::command]
@@ -489,8 +513,20 @@ fn sanitize_diagnostic_line(line: &str, config: &AppConfig) -> String {
     sanitized
 }
 
+fn diagnostic_redacted_fields(config: &AppConfig) -> Vec<String> {
+    let mut fields = Vec::new();
+    if !config.btc_address.trim().is_empty() {
+        fields.push("btc_address".to_owned());
+    }
+    if !config.webhook_url.trim().is_empty() {
+        fields.push("webhook_url".to_owned());
+    }
+    fields
+}
+
 fn build_diagnostic_snapshot(app: &AppHandle) -> Result<String, String> {
     let config = load_config(app)?;
+    let redacted_fields = diagnostic_redacted_fields(&config);
     let (log_path, recent_log_lines) = read_recent_log_lines(app, 80)?;
     let recent_log_lines = recent_log_lines
         .into_iter()
@@ -516,6 +552,7 @@ fn build_diagnostic_snapshot(app: &AppHandle) -> Result<String, String> {
         })
         .collect();
     let snapshot = DiagnosticSnapshot {
+        diagnostic_schema_version: DIAGNOSTIC_SCHEMA_VERSION,
         generated_at: chrono::Utc::now().to_rfc3339(),
         product_name: app
             .config()
@@ -530,6 +567,7 @@ fn build_diagnostic_snapshot(app: &AppHandle) -> Result<String, String> {
         log_path,
         recent_log_lines,
         last_connection_error,
+        redacted_fields,
     };
 
     serde_json::to_string_pretty(&snapshot)
@@ -671,6 +709,7 @@ pub fn run() {
             get_gpu_devices,
             run_gpu_benchmark,
             get_diagnostic_snapshot,
+            save_diagnostic_snapshot,
             start_real_mining,
             stop_real_mining,
             notify_jackpot,
@@ -825,6 +864,23 @@ mod tests {
         assert!(sanitized.contains("[redacted webhook url]"));
         assert!(!sanitized.contains("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"));
         assert!(!sanitized.contains("secret-hook"));
+    }
+
+    #[test]
+    fn diagnostic_redacted_fields_track_configured_sensitive_values() {
+        let empty = AppConfig::default();
+        assert!(super::diagnostic_redacted_fields(&empty).is_empty());
+
+        let configured = AppConfig {
+            btc_address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa".into(),
+            webhook_url: "https://example.invalid/secret-hook".into(),
+            ..AppConfig::default()
+        };
+
+        assert_eq!(
+            super::diagnostic_redacted_fields(&configured),
+            vec!["btc_address".to_owned(), "webhook_url".to_owned()]
+        );
     }
 
     #[test]

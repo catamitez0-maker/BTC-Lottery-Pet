@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .test-dist/
+.claude/
 src-tauri/target/
 src-tauri/target-dev/
 *.log

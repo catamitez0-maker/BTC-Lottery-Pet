@@ -855,6 +855,7 @@ function App() {
         hashrate: 120_000_000 * gpuIntensityPercent / 10,
         duration_ms: 250,
         note: "Simulated benchmark only. No real GPU workload was started.",
+        generated_at: new Date().toISOString(),
       });
     }
   };
@@ -901,6 +902,21 @@ function App() {
         setErrorMessage(`Could not copy diagnostics: ${formatError(error)}`);
       } else {
         setErrorMessage("Diagnostics export is available in the desktop app.");
+      }
+    }
+  };
+
+  const saveDiagnostics = async () => {
+    setErrorMessage(null);
+
+    try {
+      const path = await invoke<string>("save_diagnostic_snapshot");
+      setLatestLog(`[System] Diagnostic snapshot saved: ${path}`);
+    } catch (error) {
+      if (runningInTauri) {
+        setErrorMessage(`Could not save diagnostics: ${formatError(error)}`);
+      } else {
+        setErrorMessage("Diagnostics save is available in the desktop app.");
       }
     }
   };
@@ -1108,6 +1124,7 @@ function App() {
         openLogs={openLogs}
         copyLogPath={copyLogPath}
         copyDiagnostics={copyDiagnostics}
+        saveDiagnostics={saveDiagnostics}
       />
 
       <footer>

@@ -54,6 +54,7 @@ export interface GpuBenchmarkResult {
   hashrate: number;
   duration_ms: number;
   note: string;
+  generated_at: string;
 }
 
 export interface SimulationStats {

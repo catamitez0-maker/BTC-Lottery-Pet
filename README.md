@@ -32,8 +32,9 @@ This project does not promise or guarantee any financial return.
   `mining.log.1`) plus `found_block.json` for a block candidate event
 - Optional one-way notifications for Jackpot, share accepted, connection error,
   and coarse heartbeat status via local Windows notification or webhook
-- Detail Mode diagnostic snapshot copy with app version, sanitized config,
-  GPU list, log path, recent log lines, and the latest connection error
+- Detail Mode diagnostic snapshot copy/save with schema version, app version,
+  sanitized config, GPU list, log path, recent log lines, and the latest
+  connection error
 
 BTC Lottery Pet does not hide its process, enable itself at Windows startup,
 accept remote-control commands, or start mining automatically.
@@ -131,10 +132,13 @@ triggered by app events, but there is no remote command polling, remote control,
 or inbound webhook listener.
 
 The Detail Mode `COPY DIAG` action copies a local diagnostic JSON snapshot to
-the clipboard. It is meant for troubleshooting and intentionally excludes the
-BTC address and webhook URL. The snapshot includes the app version,
-configuration summary, GPU device list, log path, recent mining log lines, and
-latest connection error when one is present.
+the clipboard, and `SAVE DIAG` writes the same JSON to the app log folder. It
+is meant for troubleshooting and intentionally excludes the BTC address and
+webhook URL. Recent log lines are redacted against the current BTC address and
+webhook URL before export. The snapshot includes a diagnostic schema version,
+app version, configuration summary, GPU device list, log path, recent mining
+log lines, latest connection error when one is present, and the names of fields
+that were redacted.
 
 ## Configuration
 
@@ -322,9 +326,10 @@ to show the window again. Use `Quit` from the tray menu to exit the app.
 
 The tray `Open Logs` item and the Detail Mode `OPEN LOGS` button open the
 app-specific log folder. The Detail Mode `COPY LOG PATH` button copies that
-local log folder path, and `COPY DIAG` copies a sanitized diagnostic snapshot.
-The regular mining log is `mining.log`; if a block candidate is detected, the
-event is also saved as `found_block.json`.
+local log folder path, `COPY DIAG` copies a sanitized diagnostic snapshot, and
+`SAVE DIAG` writes it to the same folder. The regular mining log is
+`mining.log`; if a block candidate is detected, the event is also saved as
+`found_block.json`.
 
 ## Run and build commands
 
@@ -332,10 +337,24 @@ Use exactly one of these commands for the task at hand:
 
 | Command | Purpose |
 | --- | --- |
+| `.\scripts\dev-env.ps1` | Prints the Git/Node/npm/Cargo paths detected for this checkout and updates PATH for the script process. |
+| `.\scripts\verify.ps1` | Runs the local verification suite, using direct Node fallbacks when npm is not on PATH. Add `-Strict` for release gating. |
 | `npm run tauri:dev` | Recommended development desktop app. Starts Vite for Tauri and opens one `BTC Lottery Pet Dev` desktop window. It does not ask Vite to open a browser. |
 | `npm run dev` | Browser-only React preview at `http://localhost:1420`. It does not launch Tauri. |
 | `npm run test:frontend` | Runs the no-dependency Node unit tests for frontend mining configuration helpers. |
 | `npm run tauri:build` | Stable Windows NSIS package build for `BTC Lottery Pet`. |
+
+If a Codex or PowerShell session cannot find `git`, `npm`, or `cargo`, start
+with `.\scripts\dev-env.ps1`. The verification script can still run frontend
+tests and builds through direct Node entrypoints when `node_modules` is present
+and Node is available.
+
+## Continuous integration
+
+GitHub Actions runs the fast quality gate on push and pull request:
+production dependency audit, frontend helper tests, frontend build, Rust tests,
+and Rust Clippy with `-D warnings`. The Windows installer artifact job runs for
+`v*` tags or when the workflow is started manually with `build_installer=true`.
 
 Release builds use the Windows GUI subsystem, so the packaged app should not
 open an extra black console window next to the pet window. `npm run tauri:dev`
@@ -398,4 +417,7 @@ Before each release, verify:
    extra black console window. The development command `npm run tauri:dev` can
    still keep its development terminal open; that is expected.
 7. Detail Mode `OPEN LOGS` opens the local app log folder, `COPY LOG PATH`
-   copies that folder path, and `COPY DIAG` copies sanitized diagnostics.
+   copies that folder path, `COPY DIAG` copies sanitized diagnostics, and
+   `SAVE DIAG` writes a diagnostic JSON file.
+8. Complete the manual checks in [`RELEASE_CHECKLIST.md`](./RELEASE_CHECKLIST.md)
+   before tagging or distributing the installer.

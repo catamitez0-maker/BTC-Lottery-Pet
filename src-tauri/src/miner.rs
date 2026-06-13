@@ -1235,6 +1235,15 @@ mod tests {
         line
     }
 
+    fn protocol_test_state() -> (ProtocolState, Arc<SharedMiningState>, HashSet<u64>, Vec<String>) {
+        (
+            ProtocolState::default(),
+            Arc::new(SharedMiningState::new(Arc::new(AtomicBool::new(false)))),
+            HashSet::new(),
+            Vec::new(),
+        )
+    }
+
     #[test]
     fn formats_extranonce2_to_pool_width() {
         assert_eq!(extranonce2_hex(1, 4), "00000001");
@@ -1344,6 +1353,76 @@ mod tests {
             super::pool_response_error(&message).as_deref(),
             Some("Only allowed user agents may subscribe")
         );
+    }
+
+    #[test]
+    fn rejects_malformed_stratum_json() {
+        let (mut protocol, shared, mut pending_submissions, mut logs) = protocol_test_state();
+        let error = handle_server_message_with_logger(
+            "{not-json",
+            &mut protocol,
+            &shared,
+            &mut pending_submissions,
+            |message| logs.push(message.to_owned()),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("invalid Stratum JSON"));
+        assert!(logs.is_empty());
+    }
+
+    #[test]
+    fn surfaces_subscribe_rejection_reason() {
+        let (mut protocol, shared, mut pending_submissions, mut logs) = protocol_test_state();
+        let error = handle_server_message_with_logger(
+            r#"{"id":1,"result":null,"error":["subscription disabled",20,null]}"#,
+            &mut protocol,
+            &shared,
+            &mut pending_submissions,
+            |message| logs.push(message.to_owned()),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("pool rejected mining.subscribe"));
+        assert!(error.contains("subscription disabled"));
+        assert!(protocol.extranonce1.is_none());
+    }
+
+    #[test]
+    fn surfaces_authorize_rejection_reason() {
+        let (mut protocol, shared, mut pending_submissions, mut logs) = protocol_test_state();
+        let error = handle_server_message_with_logger(
+            r#"{"id":2,"result":false,"error":["bad user",24,null]}"#,
+            &mut protocol,
+            &shared,
+            &mut pending_submissions,
+            |message| logs.push(message.to_owned()),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("pool rejected mining.authorize"));
+        assert!(error.contains("bad user"));
+        assert_eq!(shared.connection_status.lock().unwrap().as_str(), "Starting");
+    }
+
+    #[test]
+    fn ignores_unknown_response_ids_without_share_accounting() {
+        let (mut protocol, shared, mut pending_submissions, mut logs) = protocol_test_state();
+        pending_submissions.insert(99);
+
+        handle_server_message_with_logger(
+            r#"{"id":42,"result":true,"error":null}"#,
+            &mut protocol,
+            &shared,
+            &mut pending_submissions,
+            |message| logs.push(message.to_owned()),
+        )
+        .unwrap();
+
+        assert_eq!(shared.accepted_shares.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.rejected_shares.load(Ordering::Relaxed), 0);
+        assert!(pending_submissions.contains(&99));
+        assert!(logs.is_empty());
     }
 
     #[test]

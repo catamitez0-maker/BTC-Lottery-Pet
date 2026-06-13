@@ -4,6 +4,7 @@ interface LogTickerProps {
   openLogs: () => Promise<void>;
   copyLogPath: () => Promise<void>;
   copyDiagnostics: () => Promise<void>;
+  saveDiagnostics: () => Promise<void>;
 }
 
 export default function LogTicker({
@@ -12,6 +13,7 @@ export default function LogTicker({
   openLogs,
   copyLogPath,
   copyDiagnostics,
+  saveDiagnostics,
 }: LogTickerProps) {
   if (displayMode !== "detail") {
     return null;
@@ -32,6 +34,9 @@ export default function LogTicker({
         </button>
         <button className="mini-button" onClick={() => void copyDiagnostics()} type="button">
           COPY DIAG
+        </button>
+        <button className="mini-button" onClick={() => void saveDiagnostics()} type="button">
+          SAVE DIAG
         </button>
       </div>
     </div>

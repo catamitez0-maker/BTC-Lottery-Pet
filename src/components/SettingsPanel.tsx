@@ -432,6 +432,10 @@ export default function SettingsPanel({
                 <span>Intensity</span>
                 <strong>{benchmarkResult.gpu_intensity_percent}%</strong>
               </div>
+              <div>
+                <span>Ran</span>
+                <strong>{new Date(benchmarkResult.generated_at).toLocaleString()}</strong>
+              </div>
               <p>{benchmarkResult.note}</p>
             </div>
           )}
