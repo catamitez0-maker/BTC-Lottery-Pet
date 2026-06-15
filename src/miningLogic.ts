@@ -1,13 +1,6 @@
-export type PetStatus =
-  | "Sleeping"
-  | "Connecting"
-  | "Mining"
-  | "Overdrive"
-  | "Lucky Flash"
-  | "Cooling Down"
-  | "Connection Error"
-  | "New Best Diff"
-  | "Jackpot";
+import type { PetStatus } from "./domain/petState";
+
+export type { PetStatus } from "./domain/petState";
 export type ComputeMode = "cpu" | "gpu" | "hybrid";
 export type PerformancePreset = "eco" | "normal" | "turbo" | "custom";
 export type HeartbeatInterval = "off" | "30min" | "1h" | "6h";

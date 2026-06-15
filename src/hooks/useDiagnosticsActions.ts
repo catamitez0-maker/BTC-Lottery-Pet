@@ -6,12 +6,14 @@ interface UseDiagnosticsActionsArgs {
   runningInTauri: boolean;
   setErrorMessage: Dispatch<SetStateAction<string | null>>;
   setLatestLog: Dispatch<SetStateAction<string>>;
+  getDevLogSnapshot?: () => string;
 }
 
 export function useDiagnosticsActions({
   runningInTauri,
   setErrorMessage,
   setLatestLog,
+  getDevLogSnapshot,
 }: UseDiagnosticsActionsArgs) {
   const openLogs = async () => {
     setErrorMessage(null);
@@ -48,7 +50,10 @@ export function useDiagnosticsActions({
 
     try {
       const snapshot = await invoke<string>("get_diagnostic_snapshot");
-      await navigator.clipboard.writeText(snapshot);
+      const devLogSnapshot = getDevLogSnapshot?.();
+      await navigator.clipboard.writeText(
+        devLogSnapshot ? `${snapshot}\n\n--- Frontend DEV LOG ---\n${devLogSnapshot}` : snapshot,
+      );
       setLatestLog("[System] Diagnostic snapshot copied to clipboard");
     } catch (error) {
       if (runningInTauri) {

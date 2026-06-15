@@ -437,6 +437,35 @@ h1 {
   50% { background: #ffffff; box-shadow: 0 0 9px #ffffff; }
 }
 
+@keyframes sequence-shake {
+  0%, 100% { transform: translate(0, 0); }
+  25% { transform: translate(2px, -1px); }
+  50% { transform: translate(-2px, 1px); }
+  75% { transform: translate(1px, 2px); }
+}
+
+@keyframes jackpot-particle {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(0.4);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(calc(-50% + 86px), calc(-50% - 70px)) scale(1.1);
+  }
+}
+
+@keyframes jackpot-reveal {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 @keyframes overdrive-pulse {
   0%, 100% { filter: brightness(1); transform: scale(1); }
   50% { filter: brightness(1.24); transform: scale(1.035); }
@@ -458,6 +487,39 @@ h1 {
 
 .status-copy {
   min-width: 0;
+}
+
+.luck-meter {
+  display: grid;
+  gap: 2px;
+  min-width: 54px;
+}
+
+.luck-meter span {
+  color: #8c929d;
+  font-size: 7px;
+  font-weight: 800;
+}
+
+.luck-meter b {
+  color: #ffc452;
+  font: 800 10px "Cascadia Mono", Consolas, monospace;
+}
+
+.luck-meter div {
+  background: #252932;
+  border: 1px solid #343944;
+  border-radius: 999px;
+  height: 5px;
+  overflow: hidden;
+  width: 54px;
+}
+
+.luck-meter i {
+  background: linear-gradient(90deg, #58b87a, #f7931a, #ffd35a);
+  display: block;
+  height: 100%;
+  transition: width 180ms ease;
 }
 
 .status.flash {
@@ -627,11 +689,92 @@ h2 {
   margin: 0 0 11px;
 }
 
+.mode-selection-card {
+  max-width: 420px;
+}
+
+.mode-selection-grid {
+  display: grid;
+  gap: 7px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.mode-choice {
+  background: #20242d;
+  border: 1px solid #343944;
+  border-radius: 7px;
+  color: #f4f1e8;
+  display: grid;
+  gap: 4px;
+  min-height: 86px;
+  padding: 10px;
+  text-align: left;
+}
+
+.mode-choice:hover {
+  border-color: rgba(247, 147, 26, 0.72);
+}
+
+.mode-choice span {
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.mode-choice b {
+  color: #f7931a;
+  font: 800 9px "Cascadia Mono", Consolas, monospace;
+}
+
+.mode-choice small {
+  color: #a8adb6;
+  font-size: 9px;
+  line-height: 1.35;
+}
+
 .jackpot-card {
   border-color: rgba(255, 215, 0, 0.48);
   box-shadow: 0 0 24px rgba(255, 215, 0, 0.2), 0 10px 25px rgba(0, 0, 0, 0.35);
   max-width: 320px;
   padding: 13px;
+}
+
+.jackpot-overlay {
+  overflow: hidden;
+}
+
+.jackpot-screen_effect {
+  animation: sequence-shake 0.12s linear infinite;
+}
+
+.jackpot-particles {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+}
+
+.jackpot-particles span {
+  animation: jackpot-particle 1.2s ease-out infinite;
+  background: #ffd35a;
+  border-radius: 50%;
+  height: 6px;
+  left: 50%;
+  position: absolute;
+  top: 50%;
+  width: 6px;
+}
+
+.jackpot-particles span:nth-child(2) { animation-delay: 0.12s; }
+.jackpot-particles span:nth-child(3) { animation-delay: 0.24s; }
+.jackpot-particles span:nth-child(4) { animation-delay: 0.36s; }
+.jackpot-particles span:nth-child(5) { animation-delay: 0.48s; }
+
+.jackpot-detect .jackpot-card,
+.jackpot-pause .jackpot-card {
+  opacity: 0.82;
+}
+
+.jackpot-reveal .jackpot-card {
+  animation: jackpot-reveal 0.48s ease-out both;
 }
 
 .jackpot-card h2 {

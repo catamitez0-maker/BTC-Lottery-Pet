@@ -1,11 +1,55 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import Header from "./components/Header";
 import PetDisplay from "./components/PetDisplay";
 import MetricsGrid from "./components/MetricsGrid";
 import SettingsPanel from "./components/SettingsPanel";
 import LogTicker from "./components/LogTicker";
+import {
+  idleJackpotSequence,
+  isJackpotOverlayVisible,
+  jackpotPhaseDurationMs,
+  jackpotPhaseLabel,
+  nextJackpotPhase,
+  startJackpotSequence,
+} from "./domain/jackpotSequence";
+import type { JackpotSequenceSnapshot } from "./domain/jackpotSequence";
+import {
+  createDevLogEntry,
+  createPetLogEntry,
+  latestPetLogMessage,
+  petLogMessageFromMiningEvent,
+  petLogMessageFromRawLog,
+} from "./domain/miningLogs";
+import type { DevLogEntry, PetLogEntry } from "./domain/miningLogs";
+import { miningModeLabel, miningModeOption, miningModeOptions } from "./domain/miningMode";
+import type { MiningMode } from "./domain/miningMode";
+import {
+  createBlockCandidateEvent,
+  createJackpotEvent,
+  createShareEvent,
+  miningEventLabel,
+} from "./domain/miningEvents";
+import type { MiningEvent } from "./domain/miningEvents";
+import {
+  derivePetState,
+  isAnimatedMiningState,
+  petStateLabel,
+  petStatusFromState,
+} from "./domain/petState";
+import {
+  createCpuMiningEngine as createCpuEngine,
+  createGpuMiningEngine as createGpuEngine,
+  createSimulationEngine as createSimulationEngineAdapter,
+  createStratumMiningEngine as createStratumEngine,
+} from "./engines/miningEngine";
+import type { MiningEngine, MiningEngineKind, MiningEngineLifecycle } from "./engines/miningEngine";
+import {
+  calculateProbabilitySnapshot,
+  formatProbabilityTime,
+} from "./domain/probabilityEngine";
+import type { ProbabilitySnapshot } from "./domain/probabilityEngine";
 import { formatError, formatUptime } from "./formatting";
 import { useBlockHeight } from "./hooks/useBlockHeight";
 import { useDiagnosticsActions } from "./hooks/useDiagnosticsActions";
@@ -54,6 +98,15 @@ export type {
   SimulationStats,
   SystemInfo,
 } from "./miningLogic";
+export type {
+  JackpotSequencePhase,
+  JackpotSequenceSnapshot,
+} from "./domain/jackpotSequence";
+export type { DevLogEntry, PetLogEntry } from "./domain/miningLogs";
+export type { MiningMode } from "./domain/miningMode";
+export type { MiningEvent } from "./domain/miningEvents";
+export type { PetState } from "./domain/petState";
+export type { ProbabilitySnapshot } from "./domain/probabilityEngine";
 
 const fallbackConfig: AppConfig = {
   btc_address: "",
@@ -143,6 +196,7 @@ function App() {
   const [config, setConfig] = useState<AppConfig>(fallbackConfig);
   const [draftConfig, setDraftConfig] = useState<AppConfig>(fallbackConfig);
   const [realModeEnabled, setRealModeEnabled] = useState(false);
+  const [selectedMiningMode, setSelectedMiningMode] = useState<MiningMode | null>(null);
   const [showWarning, setShowWarning] = useState(false);
   const [showCpuWarning, setShowCpuWarning] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -157,14 +211,16 @@ function App() {
   const [simAccepted, setSimAccepted] = useState(0);
   const [simRejected, setSimRejected] = useState(0);
   const blockHeight = useBlockHeight();
-  const [latestLog, setLatestLog] = useState("[System] Ready");
+  const [latestLog, setLatestLog] = useState("Ready to dream.");
+  const [petLogs, setPetLogs] = useState<PetLogEntry[]>([]);
+  const [devLogs, setDevLogs] = useState<DevLogEntry[]>([]);
+  const [lastMiningEvent, setLastMiningEvent] = useState<MiningEvent | null>(null);
+  const [attentionEvent, setAttentionEvent] = useState<MiningEvent | null>(null);
   const [lastShare, setLastShare] = useState("None");
-  const [blockFound, setBlockFound] = useState<BlockFoundEvent | null>(null);
-  const [showJackpot, setShowJackpot] = useState(false);
+  const [jackpotSequence, setJackpotSequence] =
+    useState<JackpotSequenceSnapshot>(idleJackpotSequence);
 
   const [isCoolingDown, setIsCoolingDown] = useState(false);
-  const [isLucky, setIsLucky] = useState(false);
-  const [isNewBest, setIsNewBest] = useState(false);
   const [displayMode, setDisplayMode] = useState<"compact" | "detail">("compact");
   const [systemInfo, setSystemInfo] = useState<SystemInfo>(fallbackSystemInfo);
   const [gpuDevices, setGpuDevices] = useState<GpuDevice[]>(fallbackGpuDevices);
@@ -174,7 +230,6 @@ function App() {
 
   const coolingDownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const simShareTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const simLuckyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const configRef = useLatestRef(config);
   const realStatsRef = useLatestRef(realStats);
   const simulationStatsRef = useLatestRef(simulationStats);
@@ -184,14 +239,36 @@ function App() {
   const simRejectedRef = useLatestRef(simRejected);
   const realModeEnabledRef = useLatestRef(realModeEnabled);
   const isMiningRef = useLatestRef(isMining);
+  const selectedMiningModeRef = useLatestRef(selectedMiningMode);
   const lastConnectionNotificationRef = useRef(0);
+  const appendPetLog = useCallback((message: string) => {
+    const entry = createPetLogEntry(message);
+    setPetLogs((current) => [entry, ...current].slice(0, 20));
+    setLatestLog(latestPetLogMessage(entry));
+  }, []);
+  const appendDevLog = useCallback((source: DevLogEntry["source"], message: string) => {
+    const entry = createDevLogEntry(source, message);
+    setDevLogs((current) => [entry, ...current].slice(0, 80));
+  }, []);
+  const emitMiningEvent = useCallback((event: MiningEvent) => {
+    if (event.level !== "LOW_LEVEL") {
+      setLastMiningEvent(event);
+      if (event.type === "share_accepted" || event.type === "block_candidate" || event.type === "jackpot") {
+        setAttentionEvent(event);
+      }
+
+      const petMessage = petLogMessageFromMiningEvent(event);
+      if (petMessage) {
+        appendPetLog(petMessage);
+      }
+    }
+  }, [appendPetLog]);
 
   // Component unmount cleanup
   useEffect(() => {
     return () => {
       if (coolingDownTimerRef.current) clearTimeout(coolingDownTimerRef.current);
       if (simShareTimerRef.current) clearTimeout(simShareTimerRef.current);
-      if (simLuckyTimerRef.current) clearTimeout(simLuckyTimerRef.current);
     };
   }, []);
 
@@ -291,7 +368,11 @@ function App() {
     listen<string>("mining-log", (event) => {
       const message = event.payload;
       const cleanMessage = message.replace(/^\[[^\]]+\]\s*/, "");
-      setLatestLog(message);
+      appendDevLog("stratum", message);
+      const petMessage = petLogMessageFromRawLog(message);
+      if (petMessage) {
+        appendPetLog(petMessage);
+      }
 
       const lowerMessage = message.toLowerCase();
       const shouldSyncRealMining = isMiningRef.current && realModeEnabledRef.current;
@@ -313,6 +394,7 @@ function App() {
       }
 
       if (lowerMessage.includes("share accepted")) {
+        emitMiningEvent(createShareEvent("share_accepted", "stratum", cleanMessage));
         if (shouldSyncRealMining) {
           // Share count is tracked by the backend via mining-stats events.
           // We only trigger the notification here.
@@ -320,6 +402,8 @@ function App() {
             settings: notificationSettingsFromConfig(configRef.current),
           }).catch(() => {});
         }
+      } else if (lowerMessage.includes("share rejected")) {
+        emitMiningEvent(createShareEvent("share_rejected", "stratum", cleanMessage));
       }
 
       if (lowerMessage.includes("connection error")) {
@@ -346,7 +430,7 @@ function App() {
       });
 
     return () => { unmounted = true; unlisten?.(); };
-  }, []);
+  }, [appendDevLog, appendPetLog, emitMiningEvent]);
 
   // Listen to Block Candidate Events
   useEffect(() => {
@@ -354,11 +438,33 @@ function App() {
     let unmounted = false;
 
     listen<BlockFoundEvent>("block-found", (event) => {
-      setBlockFound(event.payload);
-      setShowJackpot(true);
-      setIsLucky(false);
-      setIsNewBest(false);
-      setLatestLog(`[Jackpot] Block candidate found: job=${event.payload.job_id}, hash=${event.payload.hash}`);
+      const wasMining = isMiningRef.current;
+      const engineKind: MiningEngineKind = selectedMiningModeRef.current === "solo"
+        ? "stratum"
+        : !realModeEnabledRef.current
+          ? "simulation"
+          : isGpuComputeMode(configRef.current.compute_mode)
+            ? "gpu"
+            : "cpu";
+
+      emitMiningEvent(createBlockCandidateEvent("stratum", event.payload));
+      emitMiningEvent(createJackpotEvent(event.payload));
+      appendDevLog("stratum", `Block candidate found: job=${event.payload.job_id}, hash=${event.payload.hash}`);
+      setJackpotSequence(startJackpotSequence(event.payload, wasMining, engineKind));
+
+      if (wasMining && realModeEnabledRef.current) {
+        isMiningRef.current = false;
+        setIsMining(false);
+        setRealStats((current) => ({
+          ...current,
+          hashrate: 0,
+          connection_status: "Jackpot pause",
+        }));
+        void invoke("stop_real_mining").catch((error) => {
+          appendDevLog("stratum", `Jackpot pause failed: ${formatError(error)}`);
+        });
+      }
+
       void invoke("notify_jackpot", {
         settings: notificationSettingsFromConfig(configRef.current),
         event: {
@@ -380,7 +486,7 @@ function App() {
       });
 
     return () => { unmounted = true; unlisten?.(); };
-  }, []);
+  }, [appendDevLog, emitMiningEvent, configRef, isMiningRef, realModeEnabledRef, selectedMiningModeRef]);
 
   useHeartbeatNotifications({
     config,
@@ -402,12 +508,12 @@ function App() {
     realModeEnabled,
     restartKey: config.gpu_intensity_percent,
     simShareTimerRef,
-    simLuckyTimerRef,
     setLatestLog,
     setSimAccepted,
     setSimRejected,
     setSimulationStats,
-    setIsLucky,
+    emitMiningEvent,
+    appendDevLog,
   });
 
   // Track New Best Difficulty
@@ -421,38 +527,17 @@ function App() {
     }
     if (activeBestDiff > prevBestDiffRef.current) {
       if (prevBestDiffRef.current > 0) {
-        setIsNewBest(true);
-        const timer = setTimeout(() => setIsNewBest(false), 3000);
+        appendPetLog("I found a sharper pattern.");
         prevBestDiffRef.current = activeBestDiff;
-        return () => clearTimeout(timer);
+        return;
       }
       prevBestDiffRef.current = activeBestDiff;
     }
-  }, [activeBestDiff, isMining]);
-
-  // Track Real Accepted Shares for Lucky Trigger
-  const prevAcceptedSharesRef = useRef(0);
-
-  useEffect(() => {
-    if (!isMining || !realModeEnabled) {
-      prevAcceptedSharesRef.current = realStats.accepted_shares;
-      return;
-    }
-    if (realStats.accepted_shares > prevAcceptedSharesRef.current) {
-      if (prevAcceptedSharesRef.current > 0) {
-        setIsLucky(true);
-        const timer = setTimeout(() => setIsLucky(false), 3000);
-        prevAcceptedSharesRef.current = realStats.accepted_shares;
-        return () => clearTimeout(timer);
-      }
-      prevAcceptedSharesRef.current = realStats.accepted_shares;
-    }
-  }, [realStats.accepted_shares, isMining, realModeEnabled]);
+  }, [activeBestDiff, appendPetLog, isMining]);
 
   const startRealMiningConfirmed = async (realCpuThreads: number) => {
     isMiningRef.current = true;
     setIsMining(true);
-    prevAcceptedSharesRef.current = 0;
     setRealStats((current) => ({
       ...current,
       hashrate: 0,
@@ -469,6 +554,7 @@ function App() {
     }));
 
     try {
+      appendDevLog("stratum", `Starting real mining on ${config.pool_host}:${config.pool_port}`);
       await invoke("start_real_mining", {
         settings: {
           poolHost: config.pool_host,
@@ -487,32 +573,36 @@ function App() {
       isMiningRef.current = false;
       setIsMining(false);
       setErrorMessage(String(error));
-      setRealStats((current) => ({ ...current, connection_status: "Stopped" }));
+      appendDevLog("stratum", `Start real mining failed: ${formatError(error)}`);
+      setRealStats((current) => ({ ...current, connection_status: "Connection Error" }));
     }
   };
 
-  const startMining = async () => {
+  const prepareMiningStart = () => {
     setErrorMessage(null);
     setMiningUptime(0);
     setIsCoolingDown(false);
     setLastShare("None");
+    setAttentionEvent(null);
     if (coolingDownTimerRef.current) {
       clearTimeout(coolingDownTimerRef.current);
       coolingDownTimerRef.current = null;
     }
+  };
 
-    if (!realModeEnabled) {
-      isMiningRef.current = true;
-      setIsMining(true);
-      setSimAccepted(0);
-      setSimRejected(0);
-      setSimulationStats((current) => ({
-        ...current,
-        status: "Mining",
-      }));
-      return;
-    }
+  const startSimulationSession = () => {
+    isMiningRef.current = true;
+    setIsMining(true);
+    setSimAccepted(0);
+    setSimRejected(0);
+    appendPetLog("I am dreaming of hashes.");
+    setSimulationStats((current) => ({
+      ...current,
+      status: "Mining",
+    }));
+  };
 
+  const startRealMiningSession = async (kind: Exclude<MiningEngineKind, "simulation">) => {
     const startError = realMiningStartError(config, gpuDevices, runningInTauri);
     if (startError) {
       setErrorMessage(startError);
@@ -536,6 +626,7 @@ function App() {
       return;
     }
 
+    appendPetLog(kind === "gpu" ? "The GPU is warming up." : "I am listening for pool work.");
     await startRealMiningConfirmed(realCpuThreads);
   };
 
@@ -550,7 +641,7 @@ function App() {
     await startRealMiningConfirmed(realCpuThreads);
   };
 
-  const stopMining = async () => {
+  const beginMiningCooldown = () => {
     isMiningRef.current = false;
     setIsMining(false);
     setIsCoolingDown(true);
@@ -560,12 +651,7 @@ function App() {
       clearTimeout(simShareTimerRef.current);
       simShareTimerRef.current = null;
     }
-    if (simLuckyTimerRef.current) {
-      clearTimeout(simLuckyTimerRef.current);
-      simLuckyTimerRef.current = null;
-    }
-    setIsLucky(false);
-    setIsNewBest(false);
+    setAttentionEvent(null);
 
     if (coolingDownTimerRef.current) {
       clearTimeout(coolingDownTimerRef.current);
@@ -574,24 +660,11 @@ function App() {
       setIsCoolingDown(false);
       coolingDownTimerRef.current = null;
     }, 4000);
+  };
 
-    if (realModeEnabled) {
-      setRealStats((current) => ({
-        ...current,
-        hashrate: 0,
-        connection_status: "Stopped",
-      }));
-
-      try {
-        await invoke("stop_real_mining");
-      } catch (error) {
-        if (runningInTauri) {
-          setErrorMessage(`Could not stop mining: ${formatError(error)}`);
-        }
-      }
-      return;
-    }
-
+  const stopSimulationSession = () => {
+    beginMiningCooldown();
+    appendPetLog("Dream mode is cooling down.");
     setSimulationStats((current) => ({
       ...current,
       status: "Sleeping",
@@ -599,12 +672,37 @@ function App() {
     }));
   };
 
+  const stopRealMiningSession = async () => {
+    beginMiningCooldown();
+    appendPetLog("I am stepping away from the pool.");
+    setRealStats((current) => ({
+      ...current,
+      hashrate: 0,
+      connection_status: "Stopped",
+    }));
+
+    try {
+      appendDevLog("stratum", "Stopping real mining");
+      await invoke("stop_real_mining");
+    } catch (error) {
+      appendDevLog("stratum", `Stop real mining failed: ${formatError(error)}`);
+      if (runningInTauri) {
+        setErrorMessage(`Could not stop mining: ${formatError(error)}`);
+      }
+    }
+  };
+
   const disableRealMode = async () => {
     if (isMining) {
-      await stopMining();
+      if (realModeEnabled) {
+        await stopRealMiningSession();
+      } else {
+        stopSimulationSession();
+      }
     }
 
     setRealModeEnabled(false);
+    setSelectedMiningMode("dream");
     setErrorMessage(null);
   };
 
@@ -619,6 +717,29 @@ function App() {
     } else {
       setShowWarning(true);
     }
+  };
+
+  const selectMiningMode = (mode: MiningMode) => {
+    if (isMining) {
+      setErrorMessage("Stop mining before changing modes.");
+      return;
+    }
+
+    const option = miningModeOption(mode);
+    setSelectedMiningMode(mode);
+    setRealModeEnabled(option.realModeEnabled);
+    setErrorMessage(null);
+    appendPetLog(`${option.title} selected.`);
+
+    const applyModeConfig = (current: AppConfig): AppConfig => ({
+      ...current,
+      compute_mode: option.computeMode,
+      gpu_enabled: option.computeMode !== "cpu",
+      real_mining_enabled: option.realModeEnabled,
+    });
+
+    setConfig(applyModeConfig);
+    setDraftConfig(applyModeConfig);
   };
 
   const saveSettings = async () => {
@@ -691,6 +812,7 @@ function App() {
         },
       });
       setPoolDiagnosticResult(result);
+      appendDevLog("diagnostic", `Pool diagnostic: ${result.summary}`);
       setLatestLog(`[System] Pool diagnostic: ${result.summary}`);
     } catch (error) {
       if (runningInTauri) {
@@ -712,6 +834,7 @@ function App() {
         summary: "Desktop runtime required for pool diagnostics.",
       };
       setPoolDiagnosticResult(result);
+      appendDevLog("diagnostic", `Pool diagnostic: ${result.summary}`);
       setLatestLog(`[System] Pool diagnostic: ${result.summary}`);
     }
   };
@@ -725,6 +848,10 @@ function App() {
     runningInTauri,
     setErrorMessage,
     setLatestLog,
+    getDevLogSnapshot: () => devLogs
+      .slice(0, 40)
+      .map((entry) => `[${entry.timestamp}] ${entry.source}: ${entry.message}`)
+      .join("\n"),
   });
 
   const toggleAlwaysOnTop = async () => {
@@ -745,41 +872,124 @@ function App() {
     }
   };
 
-  const isConnectionError =
-    isMining &&
-    realModeEnabled &&
-    (realStats.connection_status.startsWith("Retrying") ||
-      realStats.connection_status.toLowerCase().includes("error") ||
-      realStats.connection_status.toLowerCase().includes("failed"));
-  const connectionStatus = realStats.connection_status.toLowerCase();
-  const isConnecting =
-    isMining &&
-    realModeEnabled &&
-    !realStats.current_job_id &&
-    ["starting", "connecting", "subscribing", "authorizing", "connected", "authorized"].some((status) =>
-      connectionStatus.startsWith(status),
-    );
+  const petStateContext = {
+    isMining,
+    realModeEnabled,
+    isCoolingDown,
+    attentionEventType: attentionEvent?.type ?? null,
+    jackpotPhase: jackpotSequence.phase,
+    computeMode: config.compute_mode,
+    connectionStatus: realStats.connection_status,
+    currentJobId: realStats.current_job_id,
+  };
+  const petState = derivePetState(petStateContext);
+  const petStatus: PetStatus = petStatusFromState(petState, petStateContext);
 
-  let petStatus: PetStatus;
-  if (blockFound) {
-    petStatus = "Jackpot";
-  } else if (!isMining && !isCoolingDown) {
-    petStatus = "Sleeping";
-  } else if (isCoolingDown) {
-    petStatus = "Cooling Down";
-  } else if (isConnectionError) {
-    petStatus = "Connection Error";
-  } else if (isConnecting) {
-    petStatus = "Connecting";
-  } else if (isLucky) {
-    petStatus = "Lucky Flash";
-  } else if (isNewBest) {
-    petStatus = "New Best Diff";
-  } else if (realModeEnabled && gpuEnabled) {
-    petStatus = "Overdrive";
-  } else {
-    petStatus = "Mining";
-  }
+  const engineLifecycle: MiningEngineLifecycle = {
+    prepareStart: prepareMiningStart,
+    startSimulation: startSimulationSession,
+    startReal: startRealMiningSession,
+    stopSimulation: stopSimulationSession,
+    stopReal: stopRealMiningSession,
+    status: (kind: MiningEngineKind) => ({
+      kind,
+      petState,
+      running: isMining,
+      label: petStateLabel(petState),
+    }),
+  };
+  const miningEngine: MiningEngine = !realModeEnabled
+    ? createSimulationEngineAdapter(engineLifecycle)
+    : selectedMiningMode === "solo"
+      ? createStratumEngine(engineLifecycle)
+      : config.compute_mode === "cpu"
+        ? createCpuEngine(engineLifecycle)
+      : config.compute_mode === "gpu"
+        ? createGpuEngine(engineLifecycle)
+        : createGpuEngine(engineLifecycle);
+  const miningEngineStatus = miningEngine.status();
+
+  useEffect(() => {
+    if (!attentionEvent) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => setAttentionEvent(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [attentionEvent]);
+
+  useEffect(() => {
+    const duration = jackpotPhaseDurationMs(jackpotSequence.phase);
+    if (duration === null) {
+      return;
+    }
+
+    const sequenceId = jackpotSequence.id;
+    const timer = window.setTimeout(() => {
+      setJackpotSequence((current) => (
+        current.id === sequenceId
+          ? { ...current, phase: nextJackpotPhase(current.phase) }
+          : current
+      ));
+    }, duration);
+
+    return () => window.clearTimeout(timer);
+  }, [jackpotSequence.id, jackpotSequence.phase]);
+
+  useEffect(() => {
+    if (jackpotSequence.phase !== "resume") {
+      return;
+    }
+
+    let cancelled = false;
+    const resumeMining = async () => {
+      if (jackpotSequence.wasMining && jackpotSequence.engineKind) {
+        if (jackpotSequence.engineKind === "simulation") {
+          startSimulationSession();
+        } else {
+          const realCpuThreads = threadsForPreset(
+            config.performance_preset,
+            systemInfo,
+            config.cpu_threads,
+            config.compute_mode === "gpu",
+          );
+          await startRealMiningConfirmed(realCpuThreads);
+        }
+      }
+
+      if (!cancelled) {
+        setJackpotSequence((current) => (
+          current.id === jackpotSequence.id
+            ? { ...current, phase: "complete" }
+            : current
+        ));
+      }
+    };
+
+    void resumeMining();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    config.compute_mode,
+    config.cpu_threads,
+    config.performance_preset,
+    jackpotSequence.engineKind,
+    jackpotSequence.id,
+    jackpotSequence.phase,
+    jackpotSequence.wasMining,
+    systemInfo,
+  ]);
+
+  const dismissJackpotSequence = () => {
+    setJackpotSequence((current) => (
+      current.phase === "idle" || current.phase === "complete"
+        ? idleJackpotSequence
+        : { ...current, phase: "resume" }
+    ));
+  };
+  const jackpotVisible = isJackpotOverlayVisible(jackpotSequence);
+  const jackpotBlock = jackpotSequence.block;
 
   const sharesValue = realModeEnabled
     ? `${realStats.accepted_shares} / ${realStats.rejected_shares}`
@@ -788,11 +998,20 @@ function App() {
   const displayedHashrate = realModeEnabled
     ? formatHashrate(realStats.hashrate)
     : `${simulationStats.hashrate.toFixed(2)} MH/s`;
+  const probabilitySnapshot: ProbabilitySnapshot = calculateProbabilitySnapshot({
+    currentDifficulty: null,
+    hashrate: realModeEnabled ? realStats.hashrate : simulationStats.hashrate * 1_000_000,
+    bestDifficulty: activeBestDiff,
+    acceptedShares: realModeEnabled ? realStats.accepted_shares : simAccepted,
+    rejectedShares: realModeEnabled ? realStats.rejected_shares : simRejected,
+    miningUptimeSeconds: miningUptime,
+    realModeEnabled,
+  });
   const compactComputeMode = realModeEnabled
     ? gpuEnabled ? (config.compute_mode === "hybrid" ? "CPU+GPU" : "GPU") : "CPU"
     : "SIM";
-  const statusClassName = petStatus === "Lucky Flash" || petStatus === "Jackpot" ? "flash" : "";
-  const isMiningAnimation = petStatus === "Mining" || petStatus === "Overdrive";
+  const statusClassName = petState === "LUCKY_EVENT" ? "flash" : "";
+  const isMiningAnimation = isAnimatedMiningState(petState);
   const displayStatus = petStatus === "Jackpot" ? "JACKPOT" : petStatus;
   const poolStatus = `${config.pool_host}:${config.pool_port}`;
   const authStatus =
@@ -806,6 +1025,9 @@ function App() {
   const shareRateValue = realModeEnabled
     ? formatShareRate(expectedSharesPerHour(realStats.hashrate, realStats.share_difficulty))
     : "SIM";
+  const currentDifficultyValue = probabilitySnapshot.currentDifficulty
+    ? formatDifficulty(probabilitySnapshot.currentDifficulty)
+    : "Waiting";
   const effectiveCpuThreads = threadsForPreset(
     config.performance_preset,
     systemInfo,
@@ -838,6 +1060,12 @@ function App() {
     : [];
 
   const resourceMetrics: [string, string][] = [
+    ["MODE SELECT", miningModeLabel(selectedMiningMode)],
+    ["ENGINE", miningEngineStatus.kind.toUpperCase()],
+    ["PET STATE", miningEngineStatus.label],
+    ["EVENT", miningEventLabel(lastMiningEvent)],
+    ["PET LOGS", `${petLogs.length}`],
+    ["DEV LOGS", `${devLogs.length}`],
     ["PRESET", performancePresetLabel(config.performance_preset)],
     ["CPU THREADS", `${effectiveCpuThreads}`],
     ["RECOMMENDED", `${systemInfo.recommended_cpu_threads}`],
@@ -848,6 +1076,10 @@ function App() {
   const metrics: [string, string][] = [
     ["HASHRATE", displayedHashrate],
     ["BEST DIFF", formatDifficulty(realModeEnabled ? realStats.best_difficulty : simulationStats.bestDifficulty)],
+    ["LUCK", `${probabilitySnapshot.luckMeter}%`],
+    ["STREAK", `${probabilitySnapshot.streakCounter}`],
+    ["NET DIFF", currentDifficultyValue],
+    ["ETA BLOCK", formatProbabilityTime(probabilitySnapshot.estimatedTimeToBlockSeconds)],
     ["POOL DIFF", shareDifficultyValue],
     ["SHARES/H", shareRateValue],
     ["BLOCK HEIGHT", blockHeight],
@@ -880,7 +1112,7 @@ function App() {
   ]);
 
   return (
-    <main className={`pet-shell ${displayMode} ${petStatus === "Lucky Flash" || petStatus === "Jackpot" ? "lucky" : ""}`}>
+    <main className={`pet-shell ${displayMode} ${petState === "LUCKY_EVENT" ? "lucky" : ""} jackpot-${jackpotSequence.phase}`}>
       <Header
         realModeEnabled={realModeEnabled}
         computeMode={config.compute_mode}
@@ -912,9 +1144,17 @@ function App() {
             {displayStatus}
           </p>
         </div>
+        <div className="luck-meter" title="Display-only luck meter">
+          <span>LUCK</span>
+          <b>{probabilitySnapshot.luckMeter}%</b>
+          <div>
+            <i style={{ width: `${probabilitySnapshot.luckMeter}%` }} />
+          </div>
+        </div>
         <button
           className={isMining ? "control-button stop" : "control-button start"}
-          onClick={isMining ? stopMining : startMining}
+          disabled={!selectedMiningMode}
+          onClick={isMining ? miningEngine.stop : miningEngine.start}
           type="button"
         >
           {isMining ? "STOP" : "START"}
@@ -943,7 +1183,7 @@ function App() {
 
       <footer>
         <span className={`dot ${realModeEnabled ? "armed" : ""}`} />
-        {realModeEnabled
+        {miningModeLabel(selectedMiningMode)} · {realModeEnabled
           ? config.compute_mode === "gpu"
             ? "GPU real mining"
             : config.compute_mode === "hybrid"
@@ -967,6 +1207,29 @@ function App() {
         </p>
       )}
 
+      {!selectedMiningMode && (
+        <section className="overlay mode-selection-overlay" role="dialog" aria-modal="true" aria-label="Choose mining mode">
+          <div className="warning-card mode-selection-card">
+            <p className="eyebrow">CHOOSE MODE</p>
+            <h2>BTC Lottery Pet</h2>
+            <div className="mode-selection-grid">
+              {miningModeOptions.map((option) => (
+                <button
+                  className="mode-choice"
+                  key={option.mode}
+                  onClick={() => selectMiningMode(option.mode)}
+                  type="button"
+                >
+                  <span>{option.title}</span>
+                  <b>{option.label}</b>
+                  <small>{option.description}</small>
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
+
       {showWarning && (
         <section className="overlay" role="dialog" aria-modal="true" aria-label="Real mining warning">
           <div className="warning-card">
@@ -983,7 +1246,7 @@ function App() {
               <button
                 className="confirm-button"
                 onClick={() => {
-                  setRealModeEnabled(true);
+                  selectMiningMode("mining");
                   setShowWarning(false);
                 }}
                 type="button"
@@ -1041,10 +1304,17 @@ function App() {
         />
       )}
 
-      {showJackpot && blockFound && (
+      {jackpotVisible && jackpotBlock && (
         <section className="overlay jackpot-overlay" role="dialog" aria-modal="true" aria-label="Block candidate found">
+          <div className="jackpot-particles" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+            <span />
+            <span />
+          </div>
           <div className="warning-card jackpot-card">
-            <p className="eyebrow">BLOCK CANDIDATE FOUND</p>
+            <p className="eyebrow">{jackpotPhaseLabel(jackpotSequence.phase)}</p>
             <h2>JACKPOT</h2>
             <p>
               Network target met. The candidate was saved to found_block.json in the app log folder.
@@ -1052,34 +1322,34 @@ function App() {
             <dl>
               <div>
                 <dt>Job</dt>
-                <dd>{blockFound.job_id}</dd>
+                <dd>{jackpotBlock.job_id}</dd>
               </div>
               <div>
                 <dt>Nonce</dt>
-                <dd>{blockFound.nonce}</dd>
+                <dd>{jackpotBlock.nonce}</dd>
               </div>
               <div>
                 <dt>Pool</dt>
-                <dd>{blockFound.pool}</dd>
+                <dd>{jackpotBlock.pool}</dd>
               </div>
               <div>
                 <dt>Difficulty</dt>
-                <dd>{formatDifficulty(blockFound.difficulty)}</dd>
+                <dd>{formatDifficulty(jackpotBlock.difficulty)}</dd>
               </div>
               <div>
                 <dt>Timestamp</dt>
-                <dd title={blockFound.timestamp}>{blockFound.timestamp}</dd>
+                <dd title={jackpotBlock.timestamp}>{jackpotBlock.timestamp}</dd>
               </div>
               <div>
                 <dt>Hash</dt>
-                <dd title={blockFound.hash}>{blockFound.hash}</dd>
+                <dd title={jackpotBlock.hash}>{jackpotBlock.hash}</dd>
               </div>
             </dl>
             <div className="panel-actions">
               <button className="secondary-button" onClick={() => void openLogs()} type="button">
                 OPEN LOGS
               </button>
-              <button className="confirm-button" onClick={() => { setShowJackpot(false); setBlockFound(null); }} type="button">
+              <button className="confirm-button" onClick={dismissJackpotSequence} type="button">
                 DISMISS
               </button>
             </div>
