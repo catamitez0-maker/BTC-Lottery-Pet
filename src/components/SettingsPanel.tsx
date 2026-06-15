@@ -8,6 +8,7 @@ import type {
   PerformancePreset,
   HeartbeatInterval,
   NotificationChannel,
+  PoolDiagnosticReport,
 } from "../App";
 
 interface SettingsPanelProps {
@@ -16,7 +17,9 @@ interface SettingsPanelProps {
   setShowSettings: (show: boolean) => void;
   saveSettings: () => Promise<void>;
   runGpuBenchmark: () => Promise<void>;
+  runPoolDiagnostic: () => Promise<void>;
   benchmarkResult: GpuBenchmarkResult | null;
+  poolDiagnosticResult: PoolDiagnosticReport | null;
   gpuDevices: GpuDevice[];
   systemInfo: SystemInfo;
   formatHashrate: (hashrate: number) => string;
@@ -39,7 +42,9 @@ export default function SettingsPanel({
   setShowSettings,
   saveSettings,
   runGpuBenchmark,
+  runPoolDiagnostic,
   benchmarkResult,
+  poolDiagnosticResult,
   gpuDevices,
   systemInfo,
   formatHashrate,
@@ -121,6 +126,16 @@ export default function SettingsPanel({
               onChange={(event) =>
                 setDraftConfig({ ...draftConfig, pool_port: Number(event.target.value) })
               }
+            />
+          </label>
+          <label className="full-width">
+            POOL PASSWORD / HINT
+            <input
+              value={draftConfig.pool_password}
+              onChange={(event) =>
+                setDraftConfig({ ...draftConfig, pool_password: event.target.value })
+              }
+              placeholder="x or d=1"
             />
           </label>
           <label>
@@ -406,14 +421,23 @@ export default function SettingsPanel({
           </label>
         </div>
         <div className="benchmark-row">
-          <button
-            className="secondary-button"
-            disabled={draftConfig.compute_mode === "cpu"}
-            onClick={() => void runGpuBenchmark()}
-            type="button"
-          >
-            RUN BENCHMARK
-          </button>
+          <div className="settings-tool-actions">
+            <button
+              className="secondary-button"
+              disabled={draftConfig.compute_mode === "cpu"}
+              onClick={() => void runGpuBenchmark()}
+              type="button"
+            >
+              RUN BENCHMARK
+            </button>
+            <button
+              className="secondary-button"
+              onClick={() => void runPoolDiagnostic()}
+              type="button"
+            >
+              TEST POOL
+            </button>
+          </div>
           {benchmarkResult && (
             <div className="benchmark-result">
               <div>
@@ -437,6 +461,24 @@ export default function SettingsPanel({
                 <strong>{new Date(benchmarkResult.generated_at).toLocaleString()}</strong>
               </div>
               <p>{benchmarkResult.note}</p>
+            </div>
+          )}
+          {poolDiagnosticResult && (
+            <div className="pool-diagnostic-result" aria-label="Pool diagnostic result">
+              <div className="pool-diagnostic-summary">
+                <span>{poolDiagnosticResult.pool}</span>
+                <strong>{poolDiagnosticResult.summary}</strong>
+              </div>
+              {poolDiagnosticResult.steps.map((step) => (
+                <div
+                  className={`pool-diagnostic-step ${step.status}`}
+                  key={`${step.name}-${step.status}`}
+                >
+                  <span>{step.name}</span>
+                  <b>{step.status}</b>
+                  <p>{step.message}</p>
+                </div>
+              ))}
             </div>
           )}
         </div>

@@ -776,6 +776,12 @@ select {
   margin: 4px 0 7px;
 }
 
+.settings-tool-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
 .benchmark-result {
   background: rgba(41, 182, 246, 0.08);
   border: 1px solid rgba(41, 182, 246, 0.28);
@@ -808,6 +814,65 @@ select {
   grid-column: 1 / -1;
   line-height: 1.35;
   margin: 1px 0 0;
+}
+
+.pool-diagnostic-result {
+  background: rgba(124, 255, 209, 0.07);
+  border: 1px solid rgba(124, 255, 209, 0.2);
+  border-radius: 6px;
+  display: grid;
+  gap: 4px;
+  padding: 6px;
+  width: 100%;
+}
+
+.pool-diagnostic-summary span,
+.pool-diagnostic-step span {
+  color: #8c929d;
+  display: block;
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.pool-diagnostic-summary strong {
+  color: #e4e2dc;
+  font: 9px Inter, system-ui, sans-serif;
+  line-height: 1.35;
+  margin-top: 2px;
+  white-space: normal;
+}
+
+.pool-diagnostic-step {
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  display: grid;
+  gap: 2px 6px;
+  grid-template-columns: 1fr auto;
+  padding-top: 4px;
+}
+
+.pool-diagnostic-step b {
+  color: #7cffd1;
+  font-size: 7px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.pool-diagnostic-step.failed b {
+  color: #ff8c7d;
+}
+
+.pool-diagnostic-step.skipped b {
+  color: #f7c66c;
+}
+
+.pool-diagnostic-step p {
+  color: #c8d8df;
+  font-size: 8px;
+  grid-column: 1 / -1;
+  line-height: 1.35;
+  margin: 0;
 }
 
 .settings-panel .panel-actions {

@@ -17,6 +17,7 @@ export interface AppConfig {
   btc_address: string;
   pool_host: string;
   pool_port: number;
+  pool_password: string;
   worker_name: string;
   cpu_threads: number;
   performance_preset: PerformancePreset;
@@ -57,6 +58,22 @@ export interface GpuBenchmarkResult {
   generated_at: string;
 }
 
+export type PoolDiagnosticStatus = "ok" | "failed" | "skipped";
+
+export interface PoolDiagnosticStep {
+  name: string;
+  status: PoolDiagnosticStatus;
+  message: string;
+  duration_ms: number;
+}
+
+export interface PoolDiagnosticReport {
+  generated_at: string;
+  pool: string;
+  steps: PoolDiagnosticStep[];
+  summary: string;
+}
+
 export interface SimulationStats {
   status: PetStatus;
   hashrate: number;
@@ -68,6 +85,7 @@ export interface RealMiningStats {
   accepted_shares: number;
   rejected_shares: number;
   best_difficulty: number;
+  share_difficulty: number;
   current_job_id: string;
   connection_status: string;
   gpu_backend: string;
@@ -112,10 +130,15 @@ function normalizePoolPort(poolHost: string, poolPort: number) {
   }
 
   if (port < 1 || port > 65535) {
-    return isKnownPoolHost(poolHost) ? 3333 : 1;
+    return 3333;
   }
 
   return port;
+}
+
+function normalizePoolPassword(poolPassword: string | null | undefined) {
+  const trimmed = (poolPassword || "").trim();
+  return trimmed || "x";
 }
 
 export function normalizeAppConfig(
@@ -134,6 +157,7 @@ export function normalizeAppConfig(
     btc_address: config.btc_address.trim(),
     pool_host: poolHost,
     pool_port: normalizePoolPort(poolHost, Number(config.pool_port)),
+    pool_password: normalizePoolPassword(config.pool_password),
     worker_name: workerName,
     webhook_url: config.webhook_url.trim(),
     real_mining_enabled: false,
@@ -178,6 +202,11 @@ export function realMiningStartError(
     return "Pool port must be between 1 and 65535.";
   }
 
+  const poolPassword = normalizePoolPassword(config.pool_password);
+  if (poolPassword.length > 128 || /[\u0000-\u001F\u007F]/.test(poolPassword)) {
+    return "Pool password must be 128 characters or fewer and cannot contain control characters.";
+  }
+
   if (!workerName || !/^[A-Za-z0-9_-]+$/.test(workerName)) {
     return "Worker name may contain only letters, numbers, dashes, and underscores.";
   }
@@ -205,6 +234,37 @@ export function formatHashrate(hashrate: number) {
   }
 
   return `${hashrate.toFixed(0)} H/s`;
+}
+
+export function expectedSharesPerHour(hashrate: number, shareDifficulty: number) {
+  if (!Number.isFinite(hashrate) || !Number.isFinite(shareDifficulty)) {
+    return 0;
+  }
+  if (hashrate <= 0 || shareDifficulty <= 0) {
+    return 0;
+  }
+
+  return hashrate * 3600 / (shareDifficulty * 2 ** 32);
+}
+
+export function formatShareRate(sharesPerHour: number) {
+  if (!Number.isFinite(sharesPerHour) || sharesPerHour <= 0) {
+    return "Waiting";
+  }
+
+  if (sharesPerHour < 0.001) {
+    return "<0.001/h";
+  }
+
+  if (sharesPerHour < 1) {
+    return `${sharesPerHour.toFixed(3)}/h`;
+  }
+
+  if (sharesPerHour < 100) {
+    return `${sharesPerHour.toFixed(2)}/h`;
+  }
+
+  return `${Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(sharesPerHour)}/h`;
 }
 
 export function threadsForPreset(

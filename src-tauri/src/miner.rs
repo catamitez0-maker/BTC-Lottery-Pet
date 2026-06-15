@@ -25,6 +25,8 @@ const MAX_EXTRANONCE2_BYTES: usize = 16;
 const MAX_PENDING_SUBMISSIONS: usize = 128;
 const MAX_SHARE_SUBMISSIONS_PER_TICK: usize = 16;
 const SHARE_QUEUE_CAPACITY: usize = 256;
+const DEFAULT_POOL_PASSWORD: &str = "x";
+const MAX_POOL_PASSWORD_BYTES: usize = 128;
 // Below this, the share target saturates the full 256-bit hash space and every
 // nonce qualifies. Treat that as a misconfigured pool rather than flooding the
 // share path.
@@ -32,6 +34,9 @@ const MIN_SHARE_DIFFICULTY: f64 = 1e-9;
 const MAX_LOG_FILE_BYTES: u64 = 1024 * 1024;
 const STATS_EVENT: &str = "mining-stats";
 const BLOCK_FOUND_EVENT: &str = "block-found";
+const DIAGNOSTIC_READ_TIMEOUT: Duration = Duration::from_millis(250);
+const DIAGNOSTIC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(8);
+const DIAGNOSTIC_JOB_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(crate) fn log_message(app: &AppHandle, message: &str) {
     let _ = app.emit("mining-log", message);
@@ -79,6 +84,8 @@ fn should_rotate_log(current_bytes: u64, incoming_bytes: usize) -> bool {
 pub struct RealMiningSettings {
     pub pool_host: String,
     pub pool_port: u16,
+    #[serde(default)]
+    pub pool_password: String,
     pub btc_address: String,
     pub worker_name: String,
     pub cpu_threads: usize,
@@ -113,6 +120,7 @@ impl RealMiningSettings {
             return Err("pool port must be greater than zero".into());
         }
 
+        validate_pool_password(&self.pool_password)?;
         validate_mainnet_address(self.btc_address.trim())?;
 
         if self.worker_name.is_empty()
@@ -145,6 +153,90 @@ impl RealMiningSettings {
     fn username(&self) -> String {
         format!("{}.{}", self.btc_address.trim(), self.worker_name)
     }
+
+    fn pool_password(&self) -> String {
+        normalize_pool_password(&self.pool_password)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolDiagnosticSettings {
+    pub pool_host: String,
+    pub pool_port: u16,
+    #[serde(default)]
+    pub pool_password: String,
+    pub btc_address: String,
+    pub worker_name: String,
+}
+
+impl PoolDiagnosticSettings {
+    fn normalized(&self) -> Self {
+        Self {
+            pool_host: self.pool_host.trim().to_owned(),
+            pool_port: self.pool_port,
+            pool_password: normalize_pool_password(&self.pool_password),
+            btc_address: self.btc_address.trim().to_owned(),
+            worker_name: self.worker_name.trim().to_owned(),
+        }
+    }
+
+    fn validate_basic(&self) -> Result<(), String> {
+        if self.pool_host.is_empty()
+            || self.pool_host.chars().any(char::is_whitespace)
+            || self.pool_host.contains("://")
+            || self.pool_host.contains('/')
+        {
+            return Err("pool host must be a hostname without a URL scheme or path".into());
+        }
+
+        if self.pool_port == 0 {
+            return Err("pool port must be greater than zero".into());
+        }
+
+        validate_pool_password(&self.pool_password)?;
+
+        if !self.btc_address.is_empty() {
+            validate_mainnet_address(&self.btc_address)?;
+        }
+
+        if self.worker_name.is_empty()
+            || self
+                .worker_name
+                .chars()
+                .any(|character| !(character.is_ascii_alphanumeric() || "-_".contains(character)))
+        {
+            return Err(
+                "worker name may contain only letters, numbers, dashes, and underscores".into(),
+            );
+        }
+
+        Ok(())
+    }
+
+    fn username(&self) -> String {
+        format!("{}.{}", self.btc_address, self.worker_name)
+    }
+
+    fn pool_password(&self) -> String {
+        normalize_pool_password(&self.pool_password)
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PoolDiagnosticStep {
+    pub name: String,
+    pub status: String,
+    pub message: String,
+    pub duration_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PoolDiagnosticReport {
+    pub generated_at: String,
+    pub pool: String,
+    pub steps: Vec<PoolDiagnosticStep>,
+    pub summary: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -153,6 +245,7 @@ pub struct MiningStats {
     pub accepted_shares: u64,
     pub rejected_shares: u64,
     pub best_difficulty: f64,
+    pub share_difficulty: f64,
     pub current_job_id: String,
     pub connection_status: String,
     pub gpu_backend: String,
@@ -181,6 +274,7 @@ impl MiningStats {
             accepted_shares: 0,
             rejected_shares: 0,
             best_difficulty: 0.0,
+            share_difficulty: 0.0,
             current_job_id: String::new(),
             connection_status: "Stopped".into(),
             gpu_backend: String::new(),
@@ -340,12 +434,12 @@ impl SharedMiningState {
     }
 
     fn snapshot(&self, hashrate: f64) -> MiningStats {
-        let current_job_id = self
+        let (current_job_id, share_difficulty) = self
             .job
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
-            .map(|job| job.job_id.clone())
+            .map(|job| (job.job_id.clone(), job.share_difficulty))
             .unwrap_or_default();
 
         MiningStats {
@@ -353,6 +447,7 @@ impl SharedMiningState {
             accepted_shares: self.accepted_shares.load(Ordering::Relaxed),
             rejected_shares: self.rejected_shares.load(Ordering::Relaxed),
             best_difficulty: f64::from_bits(self.best_difficulty_bits.load(Ordering::Relaxed)),
+            share_difficulty,
             current_job_id,
             connection_status: self
                 .connection_status
@@ -450,6 +545,7 @@ fn run_stratum_connection(
         .map_err(|error| format!("failed to initialize socket reader: {error}"))?;
     let mut reader = BufReader::new(reader_stream);
     let username = settings.username();
+    let pool_password = settings.pool_password();
     let mut protocol = ProtocolState {
         difficulty: 0.001,
         ..ProtocolState::default()
@@ -474,7 +570,7 @@ fn run_stratum_connection(
         &json!({
             "id": 2,
             "method": "mining.authorize",
-            "params": [username, "x"]
+            "params": [username.clone(), pool_password]
         }),
     )?;
 
@@ -575,6 +671,398 @@ fn run_stratum_connection(
     }
 
     Ok(())
+}
+
+pub(crate) fn diagnose_pool_connection(settings: PoolDiagnosticSettings) -> PoolDiagnosticReport {
+    let settings = settings.normalized();
+    let pool = format!("{}:{}", settings.pool_host, settings.pool_port);
+    let mut report = PoolDiagnosticReport {
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        pool: pool.clone(),
+        steps: Vec::new(),
+        summary: String::new(),
+    };
+
+    let validate_start = Instant::now();
+    if let Err(error) = settings.validate_basic() {
+        report.steps.push(diagnostic_step(
+            "CONFIG",
+            "failed",
+            error.clone(),
+            validate_start.elapsed(),
+        ));
+        report.summary = format!("Configuration check failed: {error}");
+        return report;
+    }
+    report.steps.push(diagnostic_step(
+        "CONFIG",
+        "ok",
+        "Local pool settings look valid.",
+        validate_start.elapsed(),
+    ));
+
+    let dns_start = Instant::now();
+    let socket_addresses = match pool.to_socket_addrs() {
+        Ok(addresses) => addresses.collect::<Vec<_>>(),
+        Err(error) => {
+            report.steps.push(diagnostic_step(
+                "DNS",
+                "failed",
+                format!("DNS failed for {}: {error}", settings.pool_host),
+                dns_start.elapsed(),
+            ));
+            report.summary = "DNS lookup failed for the configured pool.".into();
+            return report;
+        }
+    };
+    if socket_addresses.is_empty() {
+        report.steps.push(diagnostic_step(
+            "DNS",
+            "failed",
+            format!("No address found for {}", settings.pool_host),
+            dns_start.elapsed(),
+        ));
+        report.summary = "DNS lookup returned no usable address.".into();
+        return report;
+    }
+    report.steps.push(diagnostic_step(
+        "DNS",
+        "ok",
+        format!("Resolved {} address(es).", socket_addresses.len()),
+        dns_start.elapsed(),
+    ));
+
+    let tcp_start = Instant::now();
+    let mut stream = match connect_to_pool(&pool, &socket_addresses) {
+        Ok(stream) => stream,
+        Err(error) => {
+            report.steps.push(diagnostic_step(
+                "TCP",
+                "failed",
+                error.clone(),
+                tcp_start.elapsed(),
+            ));
+            report.summary =
+                "TCP connection failed. Check the pool port, firewall, or network.".into();
+            return report;
+        }
+    };
+    if let Err(error) = stream.set_read_timeout(Some(DIAGNOSTIC_READ_TIMEOUT)) {
+        report.steps.push(diagnostic_step(
+            "TCP",
+            "failed",
+            format!("Connected, but failed to set socket read timeout: {error}"),
+            tcp_start.elapsed(),
+        ));
+        report.summary = "TCP connection setup failed after connecting.".into();
+        return report;
+    }
+    if let Err(error) = stream.set_write_timeout(Some(Duration::from_secs(2))) {
+        report.steps.push(diagnostic_step(
+            "TCP",
+            "failed",
+            format!("Connected, but failed to set socket write timeout: {error}"),
+            tcp_start.elapsed(),
+        ));
+        report.summary = "TCP connection setup failed after connecting.".into();
+        return report;
+    }
+    let reader_stream = match stream.try_clone() {
+        Ok(stream) => stream,
+        Err(error) => {
+            report.steps.push(diagnostic_step(
+                "TCP",
+                "failed",
+                format!("Connected, but failed to initialize socket reader: {error}"),
+                tcp_start.elapsed(),
+            ));
+            report.summary = "TCP connection setup failed after connecting.".into();
+            return report;
+        }
+    };
+    let mut reader = BufReader::new(reader_stream);
+    report.steps.push(diagnostic_step(
+        "TCP",
+        "ok",
+        "Connected to the pool TCP endpoint.",
+        tcp_start.elapsed(),
+    ));
+
+    let subscribe_start = Instant::now();
+    if let Err(error) = write_message(
+        &mut stream,
+        &json!({
+            "id": 1,
+            "method": "mining.subscribe",
+            "params": [format!("BTC Lottery Pet/{}", env!("CARGO_PKG_VERSION"))]
+        }),
+    ) {
+        report.steps.push(diagnostic_step(
+            "SUBSCRIBE",
+            "failed",
+            error.clone(),
+            subscribe_start.elapsed(),
+        ));
+        report.summary = "Could not send mining.subscribe to the pool.".into();
+        return report;
+    }
+    let subscribe_message =
+        match read_until_diagnostic_message(&mut reader, DIAGNOSTIC_RESPONSE_TIMEOUT, |message| {
+            message.get("id").and_then(Value::as_u64) == Some(1)
+        }) {
+            Ok(message) => message,
+            Err(error) => {
+                report.steps.push(diagnostic_step(
+                    "SUBSCRIBE",
+                    "failed",
+                    error.clone(),
+                    subscribe_start.elapsed(),
+                ));
+                report.summary = "The pool did not complete mining.subscribe.".into();
+                return report;
+            }
+        };
+    let (extranonce1, extranonce2_size) = match diagnostic_subscribe_result(&subscribe_message) {
+        Ok(result) => result,
+        Err(error) => {
+            report.steps.push(diagnostic_step(
+                "SUBSCRIBE",
+                "failed",
+                error.clone(),
+                subscribe_start.elapsed(),
+            ));
+            report.summary = error;
+            return report;
+        }
+    };
+    report.steps.push(diagnostic_step(
+        "SUBSCRIBE",
+        "ok",
+        "Pool accepted mining.subscribe.",
+        subscribe_start.elapsed(),
+    ));
+
+    if settings.btc_address.is_empty() {
+        report.steps.push(diagnostic_step(
+            "AUTHORIZE",
+            "skipped",
+            "Add a BTC address to test mining.authorize.",
+            Duration::ZERO,
+        ));
+        report.steps.push(diagnostic_step(
+            "JOB",
+            "skipped",
+            "Authorization was skipped, so job delivery was not tested.",
+            Duration::ZERO,
+        ));
+        report.summary = "Network and subscribe checks passed. Add a BTC address to test authorization and job delivery.".into();
+        return report;
+    }
+
+    let authorize_start = Instant::now();
+    if let Err(error) = write_message(
+        &mut stream,
+        &json!({
+            "id": 2,
+            "method": "mining.authorize",
+            "params": [settings.username(), settings.pool_password()]
+        }),
+    ) {
+        report.steps.push(diagnostic_step(
+            "AUTHORIZE",
+            "failed",
+            error.clone(),
+            authorize_start.elapsed(),
+        ));
+        report.summary = "Could not send mining.authorize to the pool.".into();
+        return report;
+    }
+    let authorize_message =
+        match read_until_diagnostic_message(&mut reader, DIAGNOSTIC_RESPONSE_TIMEOUT, |message| {
+            message.get("id").and_then(Value::as_u64) == Some(2)
+        }) {
+            Ok(message) => message,
+            Err(error) => {
+                report.steps.push(diagnostic_step(
+                    "AUTHORIZE",
+                    "failed",
+                    error.clone(),
+                    authorize_start.elapsed(),
+                ));
+                report.summary = "The pool did not complete mining.authorize.".into();
+                return report;
+            }
+        };
+    if let Err(error) = diagnostic_authorize_result(&authorize_message) {
+        report.steps.push(diagnostic_step(
+            "AUTHORIZE",
+            "failed",
+            error.clone(),
+            authorize_start.elapsed(),
+        ));
+        report.summary = error;
+        return report;
+    }
+    report.steps.push(diagnostic_step(
+        "AUTHORIZE",
+        "ok",
+        "Pool accepted the configured worker.",
+        authorize_start.elapsed(),
+    ));
+
+    let job_start = Instant::now();
+    let mut protocol = ProtocolState {
+        difficulty: 0.001,
+        extranonce1: Some(extranonce1),
+        extranonce2_size: Some(extranonce2_size),
+    };
+    match wait_for_diagnostic_job(&mut reader, &mut protocol, DIAGNOSTIC_JOB_TIMEOUT) {
+        Ok((job_id, share_difficulty)) => {
+            report.steps.push(diagnostic_step(
+                "JOB",
+                "ok",
+                format!(
+                    "Received mining.notify job {job_id} at share difficulty {share_difficulty}."
+                ),
+                job_start.elapsed(),
+            ));
+            report.summary = "Pool connection diagnostic passed.".into();
+        }
+        Err(error) => {
+            report.steps.push(diagnostic_step(
+                "JOB",
+                "failed",
+                error.clone(),
+                job_start.elapsed(),
+            ));
+            report.summary = "Authorization passed, but no mining job was received.".into();
+        }
+    }
+
+    report
+}
+
+fn diagnostic_step(
+    name: &str,
+    status: &str,
+    message: impl Into<String>,
+    duration: Duration,
+) -> PoolDiagnosticStep {
+    PoolDiagnosticStep {
+        name: name.to_owned(),
+        status: status.to_owned(),
+        message: message.into(),
+        duration_ms: duration.as_millis().min(u64::MAX as u128) as u64,
+    }
+}
+
+fn diagnostic_subscribe_result(message: &Value) -> Result<(String, usize), String> {
+    let result = message
+        .get("result")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            pool_response_error(message)
+                .map(|reason| format!("pool rejected mining.subscribe: {reason}"))
+                .unwrap_or_else(|| "pool returned an invalid mining.subscribe response".into())
+        })?;
+
+    let extranonce1 = result
+        .get(1)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "pool returned an incomplete mining.subscribe response".to_string())?;
+    let extranonce2_size = result
+        .get(2)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "pool returned an incomplete mining.subscribe response".to_string())
+        .and_then(|size| validate_extranonce2_size(size as usize))?;
+
+    Ok((extranonce1, extranonce2_size))
+}
+
+fn diagnostic_authorize_result(message: &Value) -> Result<(), String> {
+    if message.get("result").and_then(Value::as_bool) == Some(true) {
+        return Ok(());
+    }
+
+    let reason =
+        pool_response_error(message).unwrap_or_else(|| "authorization returned false".into());
+    Err(format!("pool rejected mining.authorize: {reason}"))
+}
+
+fn read_until_diagnostic_message(
+    reader: &mut impl BufRead,
+    timeout: Duration,
+    matches_message: impl Fn(&Value) -> bool,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if Instant::now() >= deadline {
+            return Err(format!("timed out after {} seconds", timeout.as_secs()));
+        }
+
+        match read_stratum_line(reader) {
+            Ok(None) => return Err("pool closed the connection".into()),
+            Ok(Some(line)) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                let message: Value = serde_json::from_str(trimmed)
+                    .map_err(|error| format!("invalid Stratum JSON: {error}"))?;
+                if matches_message(&message) {
+                    return Ok(message);
+                }
+            }
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(error) => return Err(format!("socket read failed: {error}")),
+        }
+    }
+}
+
+fn wait_for_diagnostic_job(
+    reader: &mut impl BufRead,
+    protocol: &mut ProtocolState,
+    timeout: Duration,
+) -> Result<(String, f64), String> {
+    let shared = Arc::new(SharedMiningState::new(Arc::new(AtomicBool::new(false))));
+    let mut pending_submissions = HashSet::new();
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "no mining.notify job received within {} seconds",
+                timeout.as_secs()
+            ));
+        }
+
+        match read_stratum_line(reader) {
+            Ok(None) => return Err("pool closed the connection before sending a job".into()),
+            Ok(Some(line)) => {
+                handle_server_message_with_logger(
+                    line.trim(),
+                    protocol,
+                    &shared,
+                    &mut pending_submissions,
+                    |_| {},
+                )?;
+
+                if let Some(job) = shared
+                    .job
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .as_ref()
+                {
+                    return Ok((job.job_id.clone(), job.share_difficulty));
+                }
+            }
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(error) => return Err(format!("socket read failed: {error}")),
+        }
+    }
 }
 
 fn handle_server_message(
@@ -812,6 +1300,30 @@ fn value_as_f64(value: &Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_str().and_then(|number| number.parse().ok()))
+}
+
+fn normalize_pool_password(password: &str) -> String {
+    let trimmed = password.trim();
+    if trimmed.is_empty() {
+        DEFAULT_POOL_PASSWORD.into()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn validate_pool_password(password: &str) -> Result<(), String> {
+    let normalized = normalize_pool_password(password);
+    if normalized.len() > MAX_POOL_PASSWORD_BYTES {
+        return Err(format!(
+            "pool password must be {MAX_POOL_PASSWORD_BYTES} bytes or fewer"
+        ));
+    }
+
+    if normalized.chars().any(char::is_control) {
+        return Err("pool password cannot contain control characters".into());
+    }
+
+    Ok(())
 }
 
 fn validate_mainnet_address(value: &str) -> Result<(), String> {
@@ -1224,8 +1736,8 @@ mod tests {
         difficulty_from_hash, extranonce2_hex, found_block_event,
         handle_server_message_with_logger, hash_meets_network_target, read_stratum_line,
         target_from_nbits, validate_mainnet_address, validate_share_difficulty, word_swapped_hex,
-        JobTemplate, ProtocolState, RealMiningSettings, SharedMiningState, MAX_PENDING_SUBMISSIONS,
-        MAX_SHARE_SUBMISSIONS_PER_TICK, MAX_STRATUM_LINE_BYTES,
+        JobTemplate, PoolDiagnosticSettings, ProtocolState, RealMiningSettings, SharedMiningState,
+        MAX_PENDING_SUBMISSIONS, MAX_SHARE_SUBMISSIONS_PER_TICK, MAX_STRATUM_LINE_BYTES,
     };
 
     fn read_mock_line(reader: &mut BufReader<TcpStream>) -> String {
@@ -1235,7 +1747,12 @@ mod tests {
         line
     }
 
-    fn protocol_test_state() -> (ProtocolState, Arc<SharedMiningState>, HashSet<u64>, Vec<String>) {
+    fn protocol_test_state() -> (
+        ProtocolState,
+        Arc<SharedMiningState>,
+        HashSet<u64>,
+        Vec<String>,
+    ) {
         (
             ProtocolState::default(),
             Arc::new(SharedMiningState::new(Arc::new(AtomicBool::new(false)))),
@@ -1402,7 +1919,10 @@ mod tests {
 
         assert!(error.contains("pool rejected mining.authorize"));
         assert!(error.contains("bad user"));
-        assert_eq!(shared.connection_status.lock().unwrap().as_str(), "Starting");
+        assert_eq!(
+            shared.connection_status.lock().unwrap().as_str(),
+            "Starting"
+        );
     }
 
     #[test]
@@ -1638,6 +2158,152 @@ mod tests {
     }
 
     #[test]
+    fn pool_diagnostic_skips_authorization_without_address() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+
+            let subscribe = read_mock_line(&mut reader);
+            assert!(subscribe.contains("\"mining.subscribe\""));
+            super::write_message(
+                &mut stream,
+                &serde_json::json!({
+                    "id": 1,
+                    "result": [null, "abcd", 4],
+                    "error": null
+                }),
+            )
+            .unwrap();
+        });
+
+        let report = super::diagnose_pool_connection(PoolDiagnosticSettings {
+            pool_host: "127.0.0.1".into(),
+            pool_port: address.port(),
+            pool_password: String::new(),
+            btc_address: String::new(),
+            worker_name: "desk_1".into(),
+        });
+
+        assert_eq!(report.pool, address.to_string());
+        assert_eq!(
+            report
+                .steps
+                .iter()
+                .find(|step| step.name == "SUBSCRIBE")
+                .map(|step| step.status.as_str()),
+            Some("ok")
+        );
+        assert_eq!(
+            report
+                .steps
+                .iter()
+                .find(|step| step.name == "AUTHORIZE")
+                .map(|step| step.status.as_str()),
+            Some("skipped")
+        );
+        assert!(report.summary.contains("Add a BTC address"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn pool_diagnostic_reports_successful_job_delivery() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+
+            let subscribe = read_mock_line(&mut reader);
+            assert!(subscribe.contains("\"mining.subscribe\""));
+            super::write_message(
+                &mut stream,
+                &serde_json::json!({
+                    "id": 1,
+                    "result": [null, "abcd", 4],
+                    "error": null
+                }),
+            )
+            .unwrap();
+
+            let authorize = read_mock_line(&mut reader);
+            assert!(authorize.contains("\"mining.authorize\""));
+            assert!(authorize.contains("desk_1"));
+            assert!(authorize.contains("d=1"));
+            super::write_message(
+                &mut stream,
+                &serde_json::json!({
+                    "id": 2,
+                    "result": true,
+                    "error": null
+                }),
+            )
+            .unwrap();
+            super::write_message(
+                &mut stream,
+                &serde_json::json!({
+                    "method": "mining.set_difficulty",
+                    "params": [0.001]
+                }),
+            )
+            .unwrap();
+            super::write_message(
+                &mut stream,
+                &serde_json::json!({
+                    "method": "mining.notify",
+                    "params": [
+                        "job-diagnostic",
+                        "0000000000000000000000000000000000000000000000000000000000000000",
+                        "00",
+                        "00",
+                        [],
+                        "20000000",
+                        "1d00ffff",
+                        "5f5e1000",
+                        true
+                    ]
+                }),
+            )
+            .unwrap();
+        });
+
+        let report = super::diagnose_pool_connection(PoolDiagnosticSettings {
+            pool_host: "127.0.0.1".into(),
+            pool_port: address.port(),
+            pool_password: " d=1 ".into(),
+            btc_address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa".into(),
+            worker_name: "desk_1".into(),
+        });
+
+        assert_eq!(report.summary, "Pool connection diagnostic passed.");
+        for step in &report.steps {
+            assert_eq!(
+                step.status, "ok",
+                "step {} failed: {}",
+                step.name, step.message
+            );
+        }
+        assert!(report
+            .steps
+            .iter()
+            .any(|step| step.name == "JOB" && step.message.contains("job-diagnostic")));
+        server.join().unwrap();
+    }
+
+    #[test]
     fn caps_share_submission_budget() {
         assert_eq!(super::submission_budget(0), MAX_SHARE_SUBMISSIONS_PER_TICK);
         assert_eq!(super::submission_budget(MAX_PENDING_SUBMISSIONS - 1), 1);
@@ -1660,6 +2326,7 @@ mod tests {
         let settings = RealMiningSettings {
             pool_host: "public-pool.io".into(),
             pool_port: 3333,
+            pool_password: String::new(),
             btc_address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa".into(),
             worker_name: "btc-lottery-pet".into(),
             cpu_threads: available_threads + 1,

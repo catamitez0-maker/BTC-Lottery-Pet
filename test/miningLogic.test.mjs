@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  expectedSharesPerHour,
+  formatShareRate,
   formatHashrate,
   hasHardwareGpuDevice,
   hasSoftwareGpuDevice,
@@ -30,6 +32,7 @@ function validConfig(overrides = {}) {
     btc_address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
     pool_host: "public-pool.io",
     pool_port: 3333,
+    pool_password: "x",
     worker_name: "desk_1",
     cpu_threads: 1,
     performance_preset: "eco",
@@ -89,6 +92,7 @@ test("config normalization trims fields and records GPU-only as zero CPU threads
       btc_address: "  1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa  ",
       pool_host: " PUBLIC-POOL.IO ",
       pool_port: 21496,
+      pool_password: " d=1 ",
       worker_name: "  desk_1  ",
       cpu_threads: 99,
       performance_preset: "turbo",
@@ -107,6 +111,7 @@ test("config normalization trims fields and records GPU-only as zero CPU threads
   assert.equal(normalized.btc_address, "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa");
   assert.equal(normalized.pool_host, "PUBLIC-POOL.IO");
   assert.equal(normalized.pool_port, 3333);
+  assert.equal(normalized.pool_password, "d=1");
   assert.equal(normalized.worker_name, "desk_1");
   assert.equal(normalized.real_mining_enabled, false);
   assert.equal(normalized.cpu_threads, 0);
@@ -114,6 +119,43 @@ test("config normalization trims fields and records GPU-only as zero CPU threads
   assert.equal(normalized.gpu_device_id, "gpu-0");
   assert.equal(normalized.gpu_intensity_percent, 100);
   assert.equal(normalized.webhook_url, "https://example.invalid/hook");
+});
+
+test("config normalization shares backend port and worker defaults", () => {
+  const knownPool = normalizeAppConfig(
+    validConfig({
+      pool_host: "pool.nerdminers.org",
+      pool_port: 21496,
+      worker_name: "  ",
+    }),
+    systemInfo,
+    devices,
+  );
+
+  assert.equal(knownPool.pool_port, 3333);
+  assert.equal(knownPool.worker_name, "btc-lottery-pet");
+
+  const customPool = normalizeAppConfig(
+    validConfig({
+      pool_host: "example.invalid",
+      pool_port: 21496,
+    }),
+    systemInfo,
+    devices,
+  );
+
+  assert.equal(customPool.pool_port, 21496);
+
+  const invalidPort = normalizeAppConfig(
+    validConfig({
+      pool_host: "example.invalid",
+      pool_port: 0,
+    }),
+    systemInfo,
+    devices,
+  );
+
+  assert.equal(invalidPort.pool_port, 3333);
 });
 
 test("real mining start validation catches local configuration mistakes", () => {
@@ -131,6 +173,10 @@ test("real mining start validation catches local configuration mistakes", () => 
     "Pool port must be between 1 and 65535.",
   );
   assert.equal(
+    realMiningStartError(validConfig({ pool_password: `${"x".repeat(129)}` }), devices, true),
+    "Pool password must be 128 characters or fewer and cannot contain control characters.",
+  );
+  assert.equal(
     realMiningStartError(validConfig({ worker_name: "desk.1" }), devices, true),
     "Worker name may contain only letters, numbers, dashes, and underscores.",
   );
@@ -145,4 +191,12 @@ test("real mining start validation catches local configuration mistakes", () => 
     ),
     "No hardware GPU detected. Switch to CPU or CPU + GPU mode, or update GPU drivers.",
   );
+});
+
+test("share rate helpers explain pool difficulty impact", () => {
+  const diffOneRate = expectedSharesPerHour(2 ** 32, 1);
+  assert.equal(diffOneRate, 3600);
+  assert.equal(formatShareRate(diffOneRate), "3,600/h");
+  assert.equal(formatShareRate(expectedSharesPerHour(500_000, 100_000)), "<0.001/h");
+  assert.equal(formatShareRate(0), "Waiting");
 });

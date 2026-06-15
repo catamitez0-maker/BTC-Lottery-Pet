@@ -4,7 +4,7 @@ mod notifications;
 
 use std::{fs, path::PathBuf, process::Command, thread};
 
-use miner::{MiningController, RealMiningSettings};
+use miner::{MiningController, PoolDiagnosticReport, PoolDiagnosticSettings, RealMiningSettings};
 use notifications::{
     HeartbeatInterval, HeartbeatSnapshot, JackpotNotificationEvent, NotificationChannel,
     NotificationSettings,
@@ -20,8 +20,9 @@ use tauri::{
 const DEFAULT_CONFIG: &str = include_str!("../../config.json");
 const DEFAULT_POOL_HOST: &str = "public-pool.io";
 const DEFAULT_POOL_PORT: u16 = 3333;
+const DEFAULT_POOL_PASSWORD: &str = "x";
 const OLD_PUBLIC_POOL_PORT: u16 = 21496;
-const DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
+const DIAGNOSTIC_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -49,6 +50,7 @@ struct AppConfig {
     #[serde(alias = "pool_url")]
     pool_host: String,
     pool_port: u16,
+    pool_password: String,
     worker_name: String,
     cpu_threads: usize,
     performance_preset: PerformancePreset,
@@ -72,6 +74,7 @@ impl Default for AppConfig {
             btc_address: String::new(),
             pool_host: DEFAULT_POOL_HOST.into(),
             pool_port: DEFAULT_POOL_PORT,
+            pool_password: DEFAULT_POOL_PASSWORD.into(),
             worker_name: "btc-lottery-pet".into(),
             cpu_threads: 1,
             performance_preset: PerformancePreset::Eco,
@@ -95,6 +98,7 @@ impl AppConfig {
     fn normalized(mut self) -> Self {
         self.btc_address = self.btc_address.trim().to_owned();
         self.pool_host = self.pool_host.trim().to_owned();
+        self.pool_password = normalize_pool_password(&self.pool_password);
         self.worker_name = self.worker_name.trim().to_owned();
         self.webhook_url = self.webhook_url.trim().to_owned();
         self.real_mining_enabled = false;
@@ -107,8 +111,8 @@ impl AppConfig {
             self.pool_host = DEFAULT_POOL_HOST.into();
         }
 
-        if self.pool_host.eq_ignore_ascii_case(DEFAULT_POOL_HOST)
-            && self.pool_port == OLD_PUBLIC_POOL_PORT
+        if is_known_pool_host(&self.pool_host)
+            && (self.pool_port == 0 || self.pool_port == OLD_PUBLIC_POOL_PORT)
         {
             self.pool_port = DEFAULT_POOL_PORT;
         }
@@ -200,7 +204,6 @@ struct DiagnosticSnapshot {
     product_name: String,
     app_version: String,
     identifier: String,
-    flavor: String,
     config: DiagnosticConfig,
     gpu_devices: Vec<GpuDevice>,
     log_path: String,
@@ -219,8 +222,24 @@ fn recommended_cpu_threads() -> usize {
     available_parallelism().min(2)
 }
 
+fn is_known_pool_host(pool_host: &str) -> bool {
+    matches!(
+        pool_host.trim().to_ascii_lowercase().as_str(),
+        "public-pool.io" | "pool.nerdminer.io" | "pool.nerdminers.org"
+    )
+}
+
 fn default_port_for_pool(_pool_host: &str) -> u16 {
     DEFAULT_POOL_PORT
+}
+
+fn normalize_pool_password(password: &str) -> String {
+    let trimmed = password.trim();
+    if trimmed.is_empty() {
+        DEFAULT_POOL_PASSWORD.into()
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -367,6 +386,15 @@ async fn run_gpu_benchmark(
 }
 
 #[tauri::command]
+async fn diagnose_pool_connection(
+    settings: PoolDiagnosticSettings,
+) -> Result<PoolDiagnosticReport, String> {
+    tauri::async_runtime::spawn_blocking(move || miner::diagnose_pool_connection(settings))
+        .await
+        .map_err(|_| "pool diagnostic task panicked".to_string())
+}
+
+#[tauri::command]
 async fn get_diagnostic_snapshot(app: AppHandle) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || build_diagnostic_snapshot(&app))
         .await
@@ -510,6 +538,12 @@ fn sanitize_diagnostic_line(line: &str, config: &AppConfig) -> String {
             sanitized = sanitized.replace(value, replacement);
         }
     }
+
+    let pool_password = normalize_pool_password(&config.pool_password);
+    if pool_password != DEFAULT_POOL_PASSWORD {
+        sanitized = sanitized.replace(&pool_password, "[redacted pool password]");
+    }
+
     sanitized
 }
 
@@ -517,6 +551,9 @@ fn diagnostic_redacted_fields(config: &AppConfig) -> Vec<String> {
     let mut fields = Vec::new();
     if !config.btc_address.trim().is_empty() {
         fields.push("btc_address".to_owned());
+    }
+    if normalize_pool_password(&config.pool_password) != DEFAULT_POOL_PASSWORD {
+        fields.push("pool_password".to_owned());
     }
     if !config.webhook_url.trim().is_empty() {
         fields.push("webhook_url".to_owned());
@@ -537,12 +574,6 @@ fn build_diagnostic_snapshot(app: &AppHandle) -> Result<String, String> {
         .rev()
         .find(|line| line.to_ascii_lowercase().contains("connection error"))
         .cloned();
-    let identifier = app.config().identifier.clone();
-    let flavor = if identifier.contains("-dev") {
-        "development"
-    } else {
-        "stable"
-    };
     let gpu_devices = gpu_miner::enumerate_gpu_devices()
         .into_iter()
         .map(|info| GpuDevice {
@@ -560,8 +591,7 @@ fn build_diagnostic_snapshot(app: &AppHandle) -> Result<String, String> {
             .clone()
             .unwrap_or_else(|| "BTC Lottery Pet".into()),
         app_version: env!("CARGO_PKG_VERSION").into(),
-        identifier,
-        flavor: flavor.into(),
+        identifier: app.config().identifier.clone(),
         config: diagnostic_config(config),
         gpu_devices,
         log_path,
@@ -708,6 +738,7 @@ pub fn run() {
             get_system_info,
             get_gpu_devices,
             run_gpu_benchmark,
+            diagnose_pool_connection,
             get_diagnostic_snapshot,
             save_diagnostic_snapshot,
             start_real_mining,
@@ -751,17 +782,44 @@ mod tests {
     }
 
     #[test]
-    fn migrates_old_public_pool_default_port() {
-        let config = AppConfig {
-            pool_host: "public-pool.io".into(),
+    fn migrates_known_pool_default_ports() {
+        for pool_host in ["public-pool.io", "pool.nerdminer.io", "pool.nerdminers.org"] {
+            let normalized = AppConfig {
+                pool_host: pool_host.into(),
+                pool_port: 21496,
+                ..AppConfig::default()
+            }
+            .normalized();
+
+            assert_eq!(normalized.pool_host, pool_host);
+            assert_eq!(normalized.pool_port, 3333);
+        }
+
+        let custom = AppConfig {
+            pool_host: "example.invalid".into(),
             pool_port: 21496,
+            ..AppConfig::default()
+        }
+        .normalized();
+
+        assert_eq!(custom.pool_host, "example.invalid");
+        assert_eq!(custom.pool_port, 21496);
+    }
+
+    #[test]
+    fn normalization_defaults_blank_worker_and_zero_port() {
+        let config = AppConfig {
+            pool_host: " example.invalid ".into(),
+            pool_port: 0,
+            worker_name: "   ".into(),
             ..AppConfig::default()
         };
 
         let normalized = config.normalized();
 
-        assert_eq!(normalized.pool_host, "public-pool.io");
+        assert_eq!(normalized.pool_host, "example.invalid");
         assert_eq!(normalized.pool_port, 3333);
+        assert_eq!(normalized.worker_name, "btc-lottery-pet");
     }
 
     #[test]
@@ -832,6 +890,7 @@ mod tests {
         let config = AppConfig {
             btc_address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa".into(),
             webhook_url: "https://example.invalid/secret-hook".into(),
+            pool_password: "d=1".into(),
             pool_host: "public-pool.io".into(),
             worker_name: "desktop".into(),
             ..AppConfig::default()
@@ -843,8 +902,33 @@ mod tests {
         assert!(serialized.contains("desktop"));
         assert!(!serialized.contains("btc_address"));
         assert!(!serialized.contains("webhook_url"));
+        assert!(!serialized.contains("pool_password"));
         assert!(!serialized.contains("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"));
         assert!(!serialized.contains("secret-hook"));
+        assert!(!serialized.contains("d=1"));
+    }
+
+    #[test]
+    fn diagnostic_snapshot_schema_uses_single_identity_fields() {
+        let snapshot = super::DiagnosticSnapshot {
+            diagnostic_schema_version: super::DIAGNOSTIC_SCHEMA_VERSION,
+            generated_at: "2026-06-15T00:00:00Z".into(),
+            product_name: "BTC Lottery Pet".into(),
+            app_version: env!("CARGO_PKG_VERSION").into(),
+            identifier: "com.btc-lottery-pet.desktop".into(),
+            config: super::diagnostic_config(AppConfig::default()),
+            gpu_devices: Vec::new(),
+            log_path: String::new(),
+            recent_log_lines: Vec::new(),
+            last_connection_error: None,
+            redacted_fields: Vec::new(),
+        };
+
+        let value = serde_json::to_value(snapshot).unwrap();
+
+        assert_eq!(value["diagnostic_schema_version"], 2);
+        assert_eq!(value["identifier"], "com.btc-lottery-pet.desktop");
+        assert!(value.get("flavor").is_none());
     }
 
     #[test]
@@ -852,17 +936,20 @@ mod tests {
         let config = AppConfig {
             btc_address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa".into(),
             webhook_url: "https://example.invalid/secret-hook".into(),
+            pool_password: "d=1".into(),
             ..AppConfig::default()
         };
 
         let sanitized = super::sanitize_diagnostic_line(
-            "connection error for 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa via https://example.invalid/secret-hook",
+            "connection error for 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa with d=1 via https://example.invalid/secret-hook",
             &config,
         );
 
         assert!(sanitized.contains("[redacted btc address]"));
+        assert!(sanitized.contains("[redacted pool password]"));
         assert!(sanitized.contains("[redacted webhook url]"));
         assert!(!sanitized.contains("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"));
+        assert!(!sanitized.contains("d=1"));
         assert!(!sanitized.contains("secret-hook"));
     }
 
@@ -874,12 +961,17 @@ mod tests {
         let configured = AppConfig {
             btc_address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa".into(),
             webhook_url: "https://example.invalid/secret-hook".into(),
+            pool_password: "d=1".into(),
             ..AppConfig::default()
         };
 
         assert_eq!(
             super::diagnostic_redacted_fields(&configured),
-            vec!["btc_address".to_owned(), "webhook_url".to_owned()]
+            vec![
+                "btc_address".to_owned(),
+                "pool_password".to_owned(),
+                "webhook_url".to_owned()
+            ]
         );
     }
 

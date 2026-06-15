@@ -7,7 +7,7 @@ edition = "2021"
 
 [lib]
 name = "btc_lottery_pet_lib"
-crate-type = ["staticlib", "rlib"]
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

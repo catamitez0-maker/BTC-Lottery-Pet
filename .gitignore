@@ -1,9 +1,11 @@
 node_modules/
 dist/
 .test-dist/
+artifacts/
 .claude/
 src-tauri/target/
 src-tauri/target-dev/
+src-tauri/target-*/
 *.log
 .idea/
 .vscode/

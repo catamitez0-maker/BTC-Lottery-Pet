@@ -220,8 +220,8 @@ fn heartbeat_actions(
 }
 
 fn run_actions(app: &AppHandle, actions: Vec<NotificationAction>) {
-    // Use this app instance's own identifier (stable vs. dev) as the toast
-    // AppUserModelID so notifications attribute to the correct installed app.
+    // Use this app instance's identifier as the toast AppUserModelID so
+    // notifications attribute to the installed app.
     let app_id = app.config().identifier.clone();
     for action in actions {
         match action {

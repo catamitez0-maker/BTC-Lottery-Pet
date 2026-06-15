@@ -22,8 +22,9 @@ This project does not promise or guarantee any financial return.
 - Real GPU mining modes using `wgpu` first and OpenCL fallback when available
 - GPU-only and CPU+GPU compute modes with backend/device diagnostics
 - Real GPU benchmark for local hardware smoke testing
-- Single-instance protection per app identifier: launching the same flavor
-  again focuses its existing window
+- Pool connection diagnostic for DNS, TCP, subscribe, authorize, and job checks
+- Single-instance protection per app identifier: launching another copy focuses
+  the existing window
 - Rust Stratum v1 client and cancellable SHA-256d hash loop
 - `Stop` control that signals the hash workers to exit immediately
 - Jackpot / block-candidate detection when a header hash meets the network
@@ -75,13 +76,21 @@ The presets are convenience defaults, not availability guarantees. The pool
 host field remains editable so you can use another trusted Stratum v1 solo
 pool after reviewing its documentation.
 
+The settings panel `TEST POOL` action checks the configured pool in stages:
+local config, DNS lookup, TCP connection, `mining.subscribe`,
+`mining.authorize`, and `mining.notify` job delivery. If no BTC address is
+configured, it still checks the network and subscribe path, then skips
+authorization and job delivery.
+
 The default worker username sent to the pool is:
 
 ```text
 <btc_address>.<worker_name>
 ```
 
-The password sent by the basic Stratum client is `x`.
+The Stratum password defaults to `x`. Some pools also accept a password hint
+such as `d=1` or `diff=1` to request a lower share difficulty; use the Pool
+Password / Hint setting when the pool documents one.
 
 ## Technical scope
 
@@ -136,9 +145,13 @@ the clipboard, and `SAVE DIAG` writes the same JSON to the app log folder. It
 is meant for troubleshooting and intentionally excludes the BTC address and
 webhook URL. Recent log lines are redacted against the current BTC address and
 webhook URL before export. The snapshot includes a diagnostic schema version,
-app version, configuration summary, GPU device list, log path, recent mining
-log lines, latest connection error when one is present, and the names of fields
-that were redacted.
+app version, single app identifier, configuration summary, GPU device list, log
+path, recent mining log lines, latest connection error when one is present, and
+the names of fields that were redacted.
+
+The settings panel pool diagnostic is an active connection check. It does not
+mine or submit shares, but it may send the configured public BTC address and
+worker name to the selected Stratum pool during the authorization stage.
 
 ## Configuration
 
@@ -172,10 +185,10 @@ configuration directory. Existing Phase 1 config files are normalized when
 loaded. `performance_preset` and `cpu_threads` are the enforced real-mining CPU
 limits. The default `eco` preset uses one CPU thread.
 
-Upgrades preserve existing custom pool selections, but migrate the old
-`public-pool.io:21496` default to `public-pool.io:3333`. If a pool rejects the
-client after connecting, review the settings panel and switch pools manually
-when appropriate.
+Upgrades preserve existing custom pool selections, but migrate the old `21496`
+preset port to `3333` for known preset hosts. If a pool rejects the client
+after connecting, review the settings panel and switch pools manually when
+appropriate.
 
 For safety, `real_mining_enabled` remains `false` in saved configuration.
 Enabling real mode is a session-only UI action. Every app launch starts in
@@ -282,6 +295,9 @@ dispatch latency, and throttle sleep. The backend also writes a low-frequency
 `GPU perf` diagnostic log line so unexpectedly low hashrate can be traced to
 backend choice, device, dispatch timing, or throttle settings.
 
+Use [`GPU_VALIDATION.md`](./GPU_VALIDATION.md) for the release validation matrix
+when GPU enumeration, benchmark, compute mode, or mining loop behavior changes.
+
 ## Prerequisites on Windows
 
 Install:
@@ -300,23 +316,26 @@ workload.
 npm install
 ```
 
-## Stable and development versions
+## Development files
 
-The project keeps two Windows app identities:
+The repository keeps source, lockfiles, configuration, tests, scripts, and docs
+in Git. Generated outputs such as `dist/`, `.test-dist/`, `src-tauri/target/`,
+`node_modules/`, local logs, and temporary release handoff files stay local and
+are ignored. The cleanup command also removes the legacy `src-tauri/target-dev/`
+cache if it exists from older development builds.
 
-| Flavor | Product name | Identifier | Build directory |
-| --- | --- | --- | --- |
-| Stable | `BTC Lottery Pet` | `com.btc-lottery-pet.desktop` | `src-tauri\target\release` |
-| Development | `BTC Lottery Pet Dev` | `com.btc-lottery-pet-dev.desktop` | `src-tauri\target-dev` |
+See [`DEVELOPMENT_FILES.md`](./DEVELOPMENT_FILES.md) for the full policy and
+cleanup commands.
 
-Use the stable build for normal desktop use. The development flavor is for
-local iteration and has a separate app identity, configuration directory, log
-directory, and Rust target directory so it does not overwrite stable files.
+## App identity
 
-Single-instance protection applies within each identifier. Starting
-`BTC Lottery Pet Dev` twice focuses the existing development window instead of
-creating another one. Stable and development builds deliberately use different
-identifiers, so they can still run side by side for testing.
+The project uses one Windows app identity: `BTC Lottery Pet` with identifier
+`com.btc-lottery-pet.desktop`. Development runs and packaged installer builds
+use the same identity so local testing matches the installed app.
+
+Single-instance protection applies to that identity. If an installed copy is
+already running, close it before starting `npm run tauri:dev`; otherwise Windows
+may focus the existing app instead of opening the source-run process.
 
 ## Tray and logs
 
@@ -339,10 +358,13 @@ Use exactly one of these commands for the task at hand:
 | --- | --- |
 | `.\scripts\dev-env.ps1` | Prints the Git/Node/npm/Cargo paths detected for this checkout and updates PATH for the script process. |
 | `.\scripts\verify.ps1` | Runs the local verification suite, using direct Node fallbacks when npm is not on PATH. Add `-Strict` for release gating. |
-| `npm run tauri:dev` | Recommended development desktop app. Starts Vite for Tauri and opens one `BTC Lottery Pet Dev` desktop window. It does not ask Vite to open a browser. |
+| `npm run clean:dev:check` | Previews removal of generated development files without deleting them. |
+| `npm run clean:dev` | Removes generated build outputs, Rust/Tauri target caches, local logs, and temporary artifacts. |
+| `.\scripts\clean-dev.ps1 -WhatIf` | Direct cleanup preview for shells where npm is not on PATH. |
+| `npm run tauri:dev` | Recommended development desktop app. Starts Vite for Tauri and opens one `BTC Lottery Pet` desktop window. It does not ask Vite to open a browser. |
 | `npm run dev` | Browser-only React preview at `http://localhost:1420`. It does not launch Tauri. |
 | `npm run test:frontend` | Runs the no-dependency Node unit tests for frontend mining configuration helpers. |
-| `npm run tauri:build` | Stable Windows NSIS package build for `BTC Lottery Pet`. |
+| `npm run tauri:build` | Windows NSIS package build for `BTC Lottery Pet`. |
 
 If a Codex or PowerShell session cannot find `git`, `npm`, or `cargo`, start
 with `.\scripts\dev-env.ps1`. The verification script can still run frontend
@@ -363,9 +385,9 @@ open while the dev app runs is normal.
 
 If you run `npm run dev` and `npm run tauri:dev` at the same time, you may see
 a browser preview and a Tauri desktop window. Other common sources of an
-apparent second window are an old executable that was not closed, or running
-the stable and development identifiers side by side. The application itself
-declares only one main Tauri window.
+apparent second window are an old executable that was not closed or an installed
+copy that is still running. The application itself declares only one main Tauri
+window.
 
 ## Run the development desktop app
 
@@ -386,21 +408,16 @@ npm run dev
 Browser previews can exercise the simulation and settings UI. Real mining runs
 only inside the Tauri app because the Rust backend owns network and hashing.
 
-## Build the stable Windows installer
+## Build the Windows installer
 
 ```powershell
 cmd.exe /v:on /d /s /c 'call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && set "PATH=%USERPROFILE%\.cargo\bin;!PATH!" && npm run tauri:build'
 ```
 
-Tauri writes the stable executable to
-`src-tauri\target\release\btc-lottery-pet.exe` and the stable NSIS installer
-under `src-tauri\target\release\bundle\nsis`.
+Tauri writes the executable to `src-tauri\target\release\btc-lottery-pet.exe`
+and the NSIS installer under `src-tauri\target\release\bundle\nsis`.
 The generated installer may download Microsoft's WebView2 bootstrapper when
 the WebView2 runtime is missing from the target computer.
-
-`npm run tauri:build-stable` remains an alias for `npm run tauri:build`.
-To package the development flavor separately, use `npm run tauri:build-dev`.
-Its Rust outputs are written under `src-tauri\target-dev`.
 
 ## Release candidate checks
 
@@ -412,7 +429,7 @@ Before each release, verify:
 3. `npm run test:frontend` passes the frontend mining configuration helper
    tests.
 4. `npm run build` passes TypeScript and Vite production builds.
-5. `npm run tauri:build` produces the stable Windows executable and installer.
+5. `npm run tauri:build` produces the Windows executable and installer.
 6. The release executable uses the Windows GUI subsystem and should not open an
    extra black console window. The development command `npm run tauri:dev` can
    still keep its development terminal open; that is expected.

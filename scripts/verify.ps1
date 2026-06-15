@@ -20,6 +20,28 @@ if (-not $node) {
   throw "Node.js is required. Run scripts\dev-env.ps1 to see detected tools."
 }
 
+if (-not (Test-Path -LiteralPath (Join-Path $repoRoot "node_modules") -PathType Container)) {
+  throw "Frontend dependencies are missing. Run npm install before scripts\verify.ps1."
+}
+
+if (-not $SkipRust -and $cargo) {
+  if (-not (Get-Command "link.exe" -ErrorAction SilentlyContinue)) {
+    [void](Import-Vcvars64Environment)
+  }
+
+  if ((Get-Command "link.exe" -ErrorAction SilentlyContinue) -and -not (Test-LibraryPathContains "kernel32.lib")) {
+    [void](Ensure-WindowsSdkForMsvc)
+  }
+
+  if (-not (Get-Command "link.exe" -ErrorAction SilentlyContinue)) {
+    throw "MSVC linker link.exe is not available. Install the Desktop development with C++ workload, or run from a Visual Studio Developer shell."
+  }
+
+  if (-not (Test-LibraryPathContains "kernel32.lib")) {
+    throw "Windows SDK libraries are not available to MSVC. Install a Windows 10/11 SDK component in Visual Studio Build Tools."
+  }
+}
+
 function Invoke-NpmOrNode {
   param(
     [Parameter(Mandatory = $true)]

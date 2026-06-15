@@ -6,9 +6,17 @@ import PetDisplay from "./components/PetDisplay";
 import MetricsGrid from "./components/MetricsGrid";
 import SettingsPanel from "./components/SettingsPanel";
 import LogTicker from "./components/LogTicker";
+import { formatError, formatUptime } from "./formatting";
+import { useBlockHeight } from "./hooks/useBlockHeight";
+import { useDiagnosticsActions } from "./hooks/useDiagnosticsActions";
+import { useHeartbeatNotifications } from "./hooks/useHeartbeatNotifications";
+import { useSimulationMiningSession } from "./hooks/useSimulationMiningSession";
+import { notificationSettingsFromConfig } from "./notificationSettings";
 import {
+  expectedSharesPerHour,
   formatDifficulty,
   formatHashrate,
+  formatShareRate,
   hasHardwareGpuDevice,
   hasSoftwareGpuDevice,
   isGpuComputeMode,
@@ -24,9 +32,9 @@ import type {
   ComputeMode,
   GpuBenchmarkResult,
   GpuDevice,
-  HeartbeatInterval,
   PetStatus,
   PerformancePreset,
+  PoolDiagnosticReport,
   RealMiningStats,
   SimulationStats,
   SystemInfo,
@@ -41,6 +49,7 @@ export type {
   NotificationChannel,
   PetStatus,
   PerformancePreset,
+  PoolDiagnosticReport,
   RealMiningStats,
   SimulationStats,
   SystemInfo,
@@ -50,6 +59,7 @@ const fallbackConfig: AppConfig = {
   btc_address: "",
   pool_host: "public-pool.io",
   pool_port: 3333,
+  pool_password: "x",
   worker_name: "btc-lottery-pet",
   cpu_threads: 1,
   performance_preset: "eco",
@@ -83,6 +93,7 @@ const idleRealStats: RealMiningStats = {
   accepted_shares: 0,
   rejected_shares: 0,
   best_difficulty: 0,
+  share_difficulty: 0,
   current_job_id: "",
   connection_status: "Stopped",
   gpu_backend: "",
@@ -93,20 +104,6 @@ const idleRealStats: RealMiningStats = {
 };
 
 const runningInTauri = isTauri();
-
-function formatError(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function formatUptime(seconds: number) {
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const remainingSeconds = seconds % 60;
-
-  return [hours, minutes, remainingSeconds]
-    .map((value) => value.toString().padStart(2, "0"))
-    .join(":");
-}
 
 function formatDispatchSize(dispatchSize: number) {
   if (!dispatchSize) {
@@ -129,31 +126,6 @@ function performancePresetLabel(preset: PerformancePreset) {
       return "Turbo";
     case "custom":
       return "Custom";
-  }
-}
-
-function notificationSettingsFromConfig(config: AppConfig) {
-  return {
-    enableNotifications: config.enable_notifications,
-    notifyOnJackpot: config.notify_on_jackpot,
-    notifyOnShareAccepted: config.notify_on_share_accepted,
-    notifyOnConnectionError: config.notify_on_connection_error,
-    heartbeatInterval: config.heartbeat_interval,
-    notificationChannel: config.notification_channel,
-    webhookUrl: config.webhook_url,
-  };
-}
-
-function heartbeatIntervalMs(interval: HeartbeatInterval) {
-  switch (interval) {
-    case "30min":
-      return 30 * 60 * 1000;
-    case "1h":
-      return 60 * 60 * 1000;
-    case "6h":
-      return 6 * 60 * 60 * 1000;
-    default:
-      return null;
   }
 }
 
@@ -184,7 +156,7 @@ function App() {
 
   const [simAccepted, setSimAccepted] = useState(0);
   const [simRejected, setSimRejected] = useState(0);
-  const [blockHeight, setBlockHeight] = useState("Loading...");
+  const blockHeight = useBlockHeight();
   const [latestLog, setLatestLog] = useState("[System] Ready");
   const [lastShare, setLastShare] = useState("None");
   const [blockFound, setBlockFound] = useState<BlockFoundEvent | null>(null);
@@ -197,6 +169,8 @@ function App() {
   const [systemInfo, setSystemInfo] = useState<SystemInfo>(fallbackSystemInfo);
   const [gpuDevices, setGpuDevices] = useState<GpuDevice[]>(fallbackGpuDevices);
   const [benchmarkResult, setBenchmarkResult] = useState<GpuBenchmarkResult | null>(null);
+  const [poolDiagnosticResult, setPoolDiagnosticResult] =
+    useState<PoolDiagnosticReport | null>(null);
 
   const coolingDownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const simShareTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -408,195 +382,33 @@ function App() {
     return () => { unmounted = true; unlisten?.(); };
   }, []);
 
-  // Fetch Block Height
-  useEffect(() => {
-    let disposed = false;
-    let activeController: AbortController | null = null;
-    let requestSequence = 0;
-
-    const getBlockHeight = async () => {
-      const requestId = ++requestSequence;
-      const urls = [
-        "https://mempool.space/api/blocks/tip/height",
-        "https://blockstream.info/api/blocks/tip/height",
-        "https://blockchain.info/q/getblockcount"
-      ];
-
-      activeController?.abort();
-
-      for (const url of urls) {
-        if (disposed || requestId !== requestSequence) {
-          return;
-        }
-
-        const controller = new AbortController();
-        activeController = controller;
-        const timeout = window.setTimeout(() => controller.abort(), 5_000);
-
-        try {
-          const res = await fetch(url, { signal: controller.signal });
-          if (res.ok) {
-            const val = await res.text();
-            const num = parseInt(val.trim(), 10);
-            if (!isNaN(num) && num > 0) {
-              if (!disposed && requestId === requestSequence) {
-                setBlockHeight(num.toLocaleString());
-              }
-              return;
-            }
-          }
-        } catch (e) {
-          console.warn(`Failed to fetch block height from ${url}:`, e);
-        } finally {
-          window.clearTimeout(timeout);
-          if (activeController === controller) {
-            activeController = null;
-          }
-        }
-      }
-
-      if (!disposed && requestId === requestSequence) {
-        setBlockHeight("Offline");
-      }
-    };
-
-    void getBlockHeight();
-    const timer = window.setInterval(() => void getBlockHeight(), 30_000);
-    return () => {
-      disposed = true;
-      requestSequence += 1;
-      activeController?.abort();
-      window.clearInterval(timer);
-    };
-  }, []);
-
-  // Heartbeat notifications are deliberately coarse-grained to avoid spam.
-  useEffect(() => {
-    const intervalMs = heartbeatIntervalMs(config.heartbeat_interval);
-    if (!config.enable_notifications || intervalMs === null) {
-      return;
-    }
-
-    const sendHeartbeat = () => {
-      const currentConfig = configRef.current;
-      const currentRealStats = realStatsRef.current;
-      const currentSimulationStats = simulationStatsRef.current;
-      const isRealMode = realModeEnabledRef.current;
-      const running = isMiningRef.current;
-      const uptimeSeconds = running ? miningUptimeRef.current : appUptimeRef.current;
-
-      void invoke("send_heartbeat_notification", {
-        settings: notificationSettingsFromConfig(currentConfig),
-        snapshot: {
-          status: running
-            ? isRealMode
-              ? currentRealStats.connection_status
-              : currentSimulationStats.status
-            : "Sleeping",
-          hashrate: isRealMode ? currentRealStats.hashrate : currentSimulationStats.hashrate * 1_000_000,
-          acceptedShares: isRealMode ? currentRealStats.accepted_shares : simAcceptedRef.current,
-          rejectedShares: isRealMode ? currentRealStats.rejected_shares : simRejectedRef.current,
-          bestDifficulty: isRealMode
-            ? currentRealStats.best_difficulty
-            : currentSimulationStats.bestDifficulty,
-          uptime: formatUptime(uptimeSeconds),
-          pool: `${currentConfig.pool_host}:${currentConfig.pool_port}`,
-        },
-      }).catch(() => {});
-    };
-
-    const timer = window.setInterval(sendHeartbeat, intervalMs);
-    return () => window.clearInterval(timer);
-  }, [config.enable_notifications, config.heartbeat_interval]);
+  useHeartbeatNotifications({
+    config,
+    configRef,
+    realStatsRef,
+    simulationStatsRef,
+    appUptimeRef,
+    miningUptimeRef,
+    simAcceptedRef,
+    simRejectedRef,
+    realModeEnabledRef,
+    isMiningRef,
+  });
 
   const gpuEnabled = isGpuComputeMode(config.compute_mode);
 
-  // Simulation Mining Loop
-  useEffect(() => {
-    if (!isMining || realModeEnabled) {
-      return;
-    }
-
-    const startSecs = new Date().toLocaleTimeString();
-    setLatestLog(`[${startSecs}] Connecting to simulation pool...`);
-    const t1 = setTimeout(() => {
-      setLatestLog(`[${new Date().toLocaleTimeString()}] Connected to simulation pool`);
-    }, 600);
-    const t2 = setTimeout(() => {
-      setLatestLog(`[${new Date().toLocaleTimeString()}] Subscribed to simulation pool`);
-    }, 1200);
-    const t3 = setTimeout(() => {
-      setLatestLog(`[${new Date().toLocaleTimeString()}] Authorized worker successfully`);
-    }, 1800);
-
-    const updateStats = () => {
-      const rand = Math.random();
-      const timeStr = new Date().toLocaleTimeString();
-
-      if (rand < 0.12) {
-        const isShareAccepted = Math.random() < 0.95;
-        const jobNum = Math.floor(Math.random() * 1000);
-        const nonceHex = Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
-
-        setLatestLog(`[${timeStr}] Share submitted: job_id=sim-${jobNum}, nonce=${nonceHex}`);
-
-        if (simShareTimerRef.current) {
-          clearTimeout(simShareTimerRef.current);
-        }
-        simShareTimerRef.current = setTimeout(() => {
-          if (isShareAccepted) {
-            setSimAccepted((a) => a + 1);
-            setLatestLog(`[${new Date().toLocaleTimeString()}] Share accepted!`);
-            setIsLucky(true);
-            if (simLuckyTimerRef.current) {
-              clearTimeout(simLuckyTimerRef.current);
-            }
-            simLuckyTimerRef.current = setTimeout(() => {
-              setIsLucky(false);
-              simLuckyTimerRef.current = null;
-            }, 3000);
-          } else {
-            setSimRejected((r) => r + 1);
-            setLatestLog(`[${new Date().toLocaleTimeString()}] Share rejected. Reason: share target out of range`);
-          }
-          simShareTimerRef.current = null;
-        }, 300);
-      } else if (rand < 0.3) {
-        const jobNum = Math.floor(Math.random() * 1000);
-        setLatestLog(`[${timeStr}] Job received: id=sim-${jobNum}, diff=0.01`);
-      }
-
-      const luckyFlash = Math.random() < 0.08;
-      const candidateDifficulty = Math.random() * Math.random() * 4_500;
-
-      const addedHashrate = 0.85 + Math.random() * 0.7;
-
-      setSimulationStats((current) => ({
-        status: luckyFlash ? "Lucky Flash" : "Mining",
-        hashrate: addedHashrate,
-        bestDifficulty: Math.max(current.bestDifficulty, candidateDifficulty),
-      }));
-    };
-
-    updateStats();
-    const timer = window.setInterval(updateStats, 1000);
-    return () => {
-      window.clearInterval(timer);
-      clearTimeout(t1);
-      clearTimeout(t2);
-      clearTimeout(t3);
-      if (simShareTimerRef.current) {
-        clearTimeout(simShareTimerRef.current);
-        simShareTimerRef.current = null;
-      }
-      if (simLuckyTimerRef.current) {
-        clearTimeout(simLuckyTimerRef.current);
-        simLuckyTimerRef.current = null;
-      }
-      setIsLucky(false);
-      setLatestLog(`[${new Date().toLocaleTimeString()}] Mining stopped`);
-    };
-  }, [config.gpu_intensity_percent, isMining, realModeEnabled]);
+  useSimulationMiningSession({
+    isMining,
+    realModeEnabled,
+    restartKey: config.gpu_intensity_percent,
+    simShareTimerRef,
+    simLuckyTimerRef,
+    setLatestLog,
+    setSimAccepted,
+    setSimRejected,
+    setSimulationStats,
+    setIsLucky,
+  });
 
   // Track New Best Difficulty
   const activeBestDiff = realModeEnabled ? realStats.best_difficulty : simulationStats.bestDifficulty;
@@ -646,6 +458,7 @@ function App() {
       hashrate: 0,
       accepted_shares: 0,
       rejected_shares: 0,
+      share_difficulty: 0,
       current_job_id: "",
       connection_status: "Connecting",
       gpu_backend: "",
@@ -660,6 +473,7 @@ function App() {
         settings: {
           poolHost: config.pool_host,
           poolPort: config.pool_port,
+          poolPassword: config.pool_password,
           btcAddress: config.btc_address,
           workerName: config.worker_name,
           cpuThreads: realCpuThreads,
@@ -860,66 +674,58 @@ function App() {
     }
   };
 
-  const openLogs = async () => {
+  const runPoolDiagnostic = async () => {
     setErrorMessage(null);
+    setPoolDiagnosticResult(null);
+
+    const settings = normalizeAppConfig(draftConfig, systemInfo, gpuDevices);
 
     try {
-      await invoke("open_log_folder");
+      const result = await invoke<PoolDiagnosticReport>("diagnose_pool_connection", {
+        settings: {
+          poolHost: settings.pool_host,
+          poolPort: settings.pool_port,
+          poolPassword: settings.pool_password,
+          btcAddress: settings.btc_address,
+          workerName: settings.worker_name,
+        },
+      });
+      setPoolDiagnosticResult(result);
+      setLatestLog(`[System] Pool diagnostic: ${result.summary}`);
     } catch (error) {
       if (runningInTauri) {
-        setErrorMessage(`Could not open logs: ${formatError(error)}`);
-      } else {
-        setErrorMessage("Log folder is available in the desktop app.");
+        setErrorMessage(`Could not run pool diagnostic: ${formatError(error)}`);
+        return;
       }
+
+      const result: PoolDiagnosticReport = {
+        generated_at: new Date().toISOString(),
+        pool: `${settings.pool_host}:${settings.pool_port}`,
+        steps: [
+          {
+            name: "DESKTOP",
+            status: "skipped",
+            message: "Pool diagnostics require the desktop runtime.",
+            duration_ms: 0,
+          },
+        ],
+        summary: "Desktop runtime required for pool diagnostics.",
+      };
+      setPoolDiagnosticResult(result);
+      setLatestLog(`[System] Pool diagnostic: ${result.summary}`);
     }
   };
 
-  const copyLogPath = async () => {
-    setErrorMessage(null);
-
-    try {
-      const path = await invoke<string>("get_log_path");
-      await navigator.clipboard.writeText(path);
-      setLatestLog(`[System] Log path copied: ${path}`);
-    } catch (error) {
-      if (runningInTauri) {
-        setErrorMessage(`Could not copy log path: ${formatError(error)}`);
-      } else {
-        setErrorMessage("Log path copy is available in the desktop app.");
-      }
-    }
-  };
-
-  const copyDiagnostics = async () => {
-    setErrorMessage(null);
-
-    try {
-      const snapshot = await invoke<string>("get_diagnostic_snapshot");
-      await navigator.clipboard.writeText(snapshot);
-      setLatestLog("[System] Diagnostic snapshot copied to clipboard");
-    } catch (error) {
-      if (runningInTauri) {
-        setErrorMessage(`Could not copy diagnostics: ${formatError(error)}`);
-      } else {
-        setErrorMessage("Diagnostics export is available in the desktop app.");
-      }
-    }
-  };
-
-  const saveDiagnostics = async () => {
-    setErrorMessage(null);
-
-    try {
-      const path = await invoke<string>("save_diagnostic_snapshot");
-      setLatestLog(`[System] Diagnostic snapshot saved: ${path}`);
-    } catch (error) {
-      if (runningInTauri) {
-        setErrorMessage(`Could not save diagnostics: ${formatError(error)}`);
-      } else {
-        setErrorMessage("Diagnostics save is available in the desktop app.");
-      }
-    }
-  };
+  const {
+    openLogs,
+    copyLogPath,
+    copyDiagnostics,
+    saveDiagnostics,
+  } = useDiagnosticsActions({
+    runningInTauri,
+    setErrorMessage,
+    setLatestLog,
+  });
 
   const toggleAlwaysOnTop = async () => {
     setErrorMessage(null);
@@ -994,6 +800,12 @@ function App() {
       ? "Authorized"
       : realStats.connection_status;
   const jobStatus = realStats.current_job_id || "Waiting";
+  const shareDifficultyValue = realModeEnabled && realStats.share_difficulty > 0
+    ? formatDifficulty(realStats.share_difficulty)
+    : "Waiting";
+  const shareRateValue = realModeEnabled
+    ? formatShareRate(expectedSharesPerHour(realStats.hashrate, realStats.share_difficulty))
+    : "SIM";
   const effectiveCpuThreads = threadsForPreset(
     config.performance_preset,
     systemInfo,
@@ -1036,6 +848,8 @@ function App() {
   const metrics: [string, string][] = [
     ["HASHRATE", displayedHashrate],
     ["BEST DIFF", formatDifficulty(realModeEnabled ? realStats.best_difficulty : simulationStats.bestDifficulty)],
+    ["POOL DIFF", shareDifficultyValue],
+    ["SHARES/H", shareRateValue],
     ["BLOCK HEIGHT", blockHeight],
     ["SHARES A / R", sharesValue],
     ["APP UPTIME", formatUptime(appUptime)],
@@ -1212,7 +1026,9 @@ function App() {
           setShowSettings={setShowSettings}
           saveSettings={saveSettings}
           runGpuBenchmark={runGpuBenchmark}
+          runPoolDiagnostic={runPoolDiagnostic}
           benchmarkResult={benchmarkResult}
+          poolDiagnosticResult={poolDiagnosticResult}
           gpuDevices={gpuDevices}
           systemInfo={systemInfo}
           formatHashrate={formatHashrate}

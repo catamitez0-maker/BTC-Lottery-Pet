@@ -27,7 +27,7 @@ artifact job runs for `v*` tags or when the workflow is started manually with
 - [ ] Install the generated `BTC Lottery Pet_<version>_x64-setup.exe` on a
       clean or throwaway Windows profile.
 - [ ] Launch from the Start menu.
-- [ ] Confirm the stable app does not open an extra black console window.
+- [ ] Confirm the packaged app does not open an extra black console window.
 - [ ] Confirm the tray icon appears and `Show` restores the window.
 - [ ] Confirm closing the window hides it instead of quitting the app.
 - [ ] Quit from the tray menu.
@@ -39,6 +39,8 @@ artifact job runs for `v*` tags or when the workflow is started manually with
 - [ ] Confirm the simulation UI renders with no console errors.
 - [ ] Open Settings.
 - [ ] Save settings with a custom worker and pool preset.
+- [ ] Run `TEST POOL` without a BTC address and confirm authorize/job are
+      skipped.
 - [ ] Switch display modes between compact and detail.
 
 ## Real Mining Smoke
@@ -47,6 +49,8 @@ Use a BTC mainnet address you control. Plain Stratum v1 is unencrypted, so do
 not use a private or sensitive worker label.
 
 - [ ] CPU Only + Eco connects to the configured pool.
+- [ ] Settings `TEST POOL` passes DNS, TCP, subscribe, authorize, and job
+      delivery for the selected pool.
 - [ ] CPU Only receives a job and updates connection status to `Mining`.
 - [ ] `STOP` emits a stopped stats snapshot and hash rate returns to zero.
 - [ ] Repeated START/STOP cycles do not leave stale pending shares.
@@ -60,6 +64,8 @@ not use a private or sensitive worker label.
 ## GPU Smoke
 
 Run these only on hardware where GPU mining is acceptable.
+Use [`GPU_VALIDATION.md`](./GPU_VALIDATION.md) for the full hardware matrix and
+release-note evidence.
 
 - [ ] Settings lists a hardware GPU or reports that none is available.
 - [ ] Software adapters are disabled for real mining.
@@ -86,7 +92,7 @@ Run these only on hardware where GPU mining is acceptable.
 - [ ] Recent log lines redact any configured BTC address.
 - [ ] Recent log lines redact any configured webhook URL.
 - [ ] Diagnostic JSON includes `diagnostic_schema_version`.
-- [ ] Diagnostic JSON includes app version, identifier, flavor, GPU devices, log
+- [ ] Diagnostic JSON includes app version, identifier, GPU devices, log
       path, and recent log lines.
 
 ## Release Notes
