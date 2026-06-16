@@ -1,4 +1,5 @@
-import type { PetStatus, RealMiningStats, SimulationStats } from "../App";
+import type { PetStatus } from "../domain/petState";
+import type { RealMiningStats, SimulationStats } from "../miningLogic";
 
 interface PetDisplayProps {
   petStatus: PetStatus;

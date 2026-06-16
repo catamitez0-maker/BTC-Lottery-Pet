@@ -5,14 +5,14 @@ import { formatError } from "../formatting";
 interface UseDiagnosticsActionsArgs {
   runningInTauri: boolean;
   setErrorMessage: Dispatch<SetStateAction<string | null>>;
-  setLatestLog: Dispatch<SetStateAction<string>>;
+  setPetLogMessage: (message: string) => void;
   getDevLogSnapshot?: () => string;
 }
 
 export function useDiagnosticsActions({
   runningInTauri,
   setErrorMessage,
-  setLatestLog,
+  setPetLogMessage,
   getDevLogSnapshot,
 }: UseDiagnosticsActionsArgs) {
   const openLogs = async () => {
@@ -35,7 +35,7 @@ export function useDiagnosticsActions({
     try {
       const path = await invoke<string>("get_log_path");
       await navigator.clipboard.writeText(path);
-      setLatestLog(`[System] Log path copied: ${path}`);
+      setPetLogMessage("Log path copied.");
     } catch (error) {
       if (runningInTauri) {
         setErrorMessage(`Could not copy log path: ${formatError(error)}`);
@@ -54,7 +54,7 @@ export function useDiagnosticsActions({
       await navigator.clipboard.writeText(
         devLogSnapshot ? `${snapshot}\n\n--- Frontend DEV LOG ---\n${devLogSnapshot}` : snapshot,
       );
-      setLatestLog("[System] Diagnostic snapshot copied to clipboard");
+      setPetLogMessage("Diagnostic snapshot copied.");
     } catch (error) {
       if (runningInTauri) {
         setErrorMessage(`Could not copy diagnostics: ${formatError(error)}`);
@@ -69,7 +69,7 @@ export function useDiagnosticsActions({
 
     try {
       const path = await invoke<string>("save_diagnostic_snapshot");
-      setLatestLog(`[System] Diagnostic snapshot saved: ${path}`);
+      setPetLogMessage("Diagnostic snapshot saved.");
     } catch (error) {
       if (runningInTauri) {
         setErrorMessage(`Could not save diagnostics: ${formatError(error)}`);

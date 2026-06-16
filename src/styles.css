@@ -737,6 +737,10 @@ h2 {
   line-height: 1.35;
 }
 
+.mode-selection-actions {
+  margin-top: 10px;
+}
+
 .jackpot-card {
   border-color: rgba(255, 215, 0, 0.48);
   box-shadow: 0 0 24px rgba(255, 215, 0, 0.2), 0 10px 25px rgba(0, 0, 0, 0.35);

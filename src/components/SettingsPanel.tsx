@@ -9,7 +9,7 @@ import type {
   HeartbeatInterval,
   NotificationChannel,
   PoolDiagnosticReport,
-} from "../App";
+} from "../miningLogic";
 
 interface SettingsPanelProps {
   draftConfig: AppConfig;

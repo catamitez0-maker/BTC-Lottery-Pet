@@ -1,4 +1,4 @@
-import type { ComputeMode } from "../App";
+import type { ComputeMode } from "../miningLogic";
 
 interface HeaderProps {
   realModeEnabled: boolean;
@@ -6,7 +6,7 @@ interface HeaderProps {
   displayMode: "compact" | "detail";
   setDisplayMode: React.Dispatch<React.SetStateAction<"compact" | "detail">>;
   isMining: boolean;
-  toggleRealMode: () => void;
+  openModeSelection: () => void;
   alwaysOnTop: boolean;
   toggleAlwaysOnTop: () => void;
 }
@@ -17,7 +17,7 @@ export default function Header({
   displayMode,
   setDisplayMode,
   isMining,
-  toggleRealMode,
+  openModeSelection,
   alwaysOnTop,
   toggleAlwaysOnTop,
 }: HeaderProps) {
@@ -47,11 +47,11 @@ export default function Header({
         <button
           className={`mode-button ${realModeEnabled ? "armed" : ""}`}
           disabled={isMining}
-          onClick={toggleRealMode}
-          title="Toggle real mining mode"
+          onClick={openModeSelection}
+          title="Choose mining mode"
           type="button"
         >
-          {realModeEnabled ? "REAL ON" : "SIM"}
+          MODE
         </button>
         <button
           className={`pin-button ${alwaysOnTop ? "active" : ""}`}

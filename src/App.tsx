@@ -73,7 +73,6 @@ import {
 import type {
   AppConfig,
   BlockFoundEvent,
-  ComputeMode,
   GpuBenchmarkResult,
   GpuDevice,
   PetStatus,
@@ -83,30 +82,6 @@ import type {
   SimulationStats,
   SystemInfo,
 } from "./miningLogic";
-export type {
-  AppConfig,
-  BlockFoundEvent,
-  ComputeMode,
-  GpuBenchmarkResult,
-  GpuDevice,
-  HeartbeatInterval,
-  NotificationChannel,
-  PetStatus,
-  PerformancePreset,
-  PoolDiagnosticReport,
-  RealMiningStats,
-  SimulationStats,
-  SystemInfo,
-} from "./miningLogic";
-export type {
-  JackpotSequencePhase,
-  JackpotSequenceSnapshot,
-} from "./domain/jackpotSequence";
-export type { DevLogEntry, PetLogEntry } from "./domain/miningLogs";
-export type { MiningMode } from "./domain/miningMode";
-export type { MiningEvent } from "./domain/miningEvents";
-export type { PetState } from "./domain/petState";
-export type { ProbabilitySnapshot } from "./domain/probabilityEngine";
 
 const fallbackConfig: AppConfig = {
   btc_address: "",
@@ -197,7 +172,7 @@ function App() {
   const [draftConfig, setDraftConfig] = useState<AppConfig>(fallbackConfig);
   const [realModeEnabled, setRealModeEnabled] = useState(false);
   const [selectedMiningMode, setSelectedMiningMode] = useState<MiningMode | null>(null);
-  const [showWarning, setShowWarning] = useState(false);
+  const [showModeSelection, setShowModeSelection] = useState(true);
   const [showCpuWarning, setShowCpuWarning] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -602,6 +577,13 @@ function App() {
     }));
   };
 
+  const realCpuThreadsForConfig = () => threadsForPreset(
+    config.performance_preset,
+    systemInfo,
+    config.cpu_threads,
+    config.compute_mode === "gpu",
+  );
+
   const startRealMiningSession = async (kind: Exclude<MiningEngineKind, "simulation">) => {
     const startError = realMiningStartError(config, gpuDevices, runningInTauri);
     if (startError) {
@@ -610,12 +592,7 @@ function App() {
       return;
     }
 
-    const realCpuThreads = threadsForPreset(
-      config.performance_preset,
-      systemInfo,
-      config.cpu_threads,
-      config.compute_mode === "gpu",
-    );
+    const realCpuThreads = realCpuThreadsForConfig();
     const highCpuRequested =
       realCpuThreads > 0 &&
       (config.performance_preset === "turbo" ||
@@ -632,13 +609,7 @@ function App() {
 
   const confirmCpuWarning = async () => {
     setShowCpuWarning(false);
-    const realCpuThreads = threadsForPreset(
-      config.performance_preset,
-      systemInfo,
-      config.cpu_threads,
-      config.compute_mode === "gpu",
-    );
-    await startRealMiningConfirmed(realCpuThreads);
+    await startRealMiningConfirmed(realCpuThreadsForConfig());
   };
 
   const beginMiningCooldown = () => {
@@ -692,31 +663,13 @@ function App() {
     }
   };
 
-  const disableRealMode = async () => {
-    if (isMining) {
-      if (realModeEnabled) {
-        await stopRealMiningSession();
-      } else {
-        stopSimulationSession();
-      }
-    }
-
-    setRealModeEnabled(false);
-    setSelectedMiningMode("dream");
-    setErrorMessage(null);
-  };
-
-  const toggleRealMode = () => {
+  const openModeSelection = () => {
     if (isMining) {
       setErrorMessage("Stop mining before changing modes.");
       return;
     }
 
-    if (realModeEnabled) {
-      void disableRealMode();
-    } else {
-      setShowWarning(true);
-    }
+    setShowModeSelection(true);
   };
 
   const selectMiningMode = (mode: MiningMode) => {
@@ -727,6 +680,7 @@ function App() {
 
     const option = miningModeOption(mode);
     setSelectedMiningMode(mode);
+    setShowModeSelection(false);
     setRealModeEnabled(option.realModeEnabled);
     setErrorMessage(null);
     appendPetLog(`${option.title} selected.`);
@@ -813,7 +767,7 @@ function App() {
       });
       setPoolDiagnosticResult(result);
       appendDevLog("diagnostic", `Pool diagnostic: ${result.summary}`);
-      setLatestLog(`[System] Pool diagnostic: ${result.summary}`);
+      appendPetLog("Pool diagnostic finished.");
     } catch (error) {
       if (runningInTauri) {
         setErrorMessage(`Could not run pool diagnostic: ${formatError(error)}`);
@@ -835,7 +789,7 @@ function App() {
       };
       setPoolDiagnosticResult(result);
       appendDevLog("diagnostic", `Pool diagnostic: ${result.summary}`);
-      setLatestLog(`[System] Pool diagnostic: ${result.summary}`);
+      appendPetLog("Pool diagnostic needs the desktop app.");
     }
   };
 
@@ -847,7 +801,7 @@ function App() {
   } = useDiagnosticsActions({
     runningInTauri,
     setErrorMessage,
-    setLatestLog,
+    setPetLogMessage: appendPetLog,
     getDevLogSnapshot: () => devLogs
       .slice(0, 40)
       .map((entry) => `[${entry.timestamp}] ${entry.source}: ${entry.message}`)
@@ -947,13 +901,7 @@ function App() {
         if (jackpotSequence.engineKind === "simulation") {
           startSimulationSession();
         } else {
-          const realCpuThreads = threadsForPreset(
-            config.performance_preset,
-            systemInfo,
-            config.cpu_threads,
-            config.compute_mode === "gpu",
-          );
-          await startRealMiningConfirmed(realCpuThreads);
+          await startRealMiningConfirmed(realCpuThreadsForConfig());
         }
       }
 
@@ -971,14 +919,10 @@ function App() {
       cancelled = true;
     };
   }, [
-    config.compute_mode,
-    config.cpu_threads,
-    config.performance_preset,
     jackpotSequence.engineKind,
     jackpotSequence.id,
     jackpotSequence.phase,
     jackpotSequence.wasMining,
-    systemInfo,
   ]);
 
   const dismissJackpotSequence = () => {
@@ -1119,7 +1063,7 @@ function App() {
         displayMode={displayMode}
         setDisplayMode={setDisplayMode}
         isMining={isMining}
-        toggleRealMode={toggleRealMode}
+        openModeSelection={openModeSelection}
         alwaysOnTop={alwaysOnTop}
         toggleAlwaysOnTop={toggleAlwaysOnTop}
       />
@@ -1207,7 +1151,7 @@ function App() {
         </p>
       )}
 
-      {!selectedMiningMode && (
+      {showModeSelection && (
         <section className="overlay mode-selection-overlay" role="dialog" aria-modal="true" aria-label="Choose mining mode">
           <div className="warning-card mode-selection-card">
             <p className="eyebrow">CHOOSE MODE</p>
@@ -1226,34 +1170,13 @@ function App() {
                 </button>
               ))}
             </div>
-          </div>
-        </section>
-      )}
-
-      {showWarning && (
-        <section className="overlay" role="dialog" aria-modal="true" aria-label="Real mining warning">
-          <div className="warning-card">
-            <p className="eyebrow">EXPLICIT OPT-IN</p>
-            <h2>Enable real mining?</h2>
-            <p>
-              Real mining mode will connect to a mining pool and use your {config.compute_mode === "gpu" ? "GPU" : config.compute_mode === "hybrid" ? "CPU + GPU" : "CPU"} to mine Bitcoin.
-              This is for education and lottery-style solo mining only.
-            </p>
-            <div className="panel-actions">
-              <button className="secondary-button" onClick={() => setShowWarning(false)} type="button">
-                CANCEL
-              </button>
-              <button
-                className="confirm-button"
-                onClick={() => {
-                  selectMiningMode("mining");
-                  setShowWarning(false);
-                }}
-                type="button"
-              >
-                ENABLE
-              </button>
-            </div>
+            {selectedMiningMode && (
+              <div className="panel-actions mode-selection-actions">
+                <button className="secondary-button" onClick={() => setShowModeSelection(false)} type="button">
+                  KEEP CURRENT
+                </button>
+              </div>
+            )}
           </div>
         </section>
       )}
