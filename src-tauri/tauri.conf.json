@@ -13,13 +13,11 @@
     "windows": [
       {
         "title": "BTC Lottery Pet",
-        "width": 360,
-        "height": 260,
+        "width": 420,
+        "height": 560,
         "minWidth": 360,
-        "minHeight": 260,
-        "maxWidth": 360,
-        "maxHeight": 260,
-        "resizable": false,
+        "minHeight": 360,
+        "resizable": true,
         "alwaysOnTop": true,
         "center": true
       }
