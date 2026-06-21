@@ -21,6 +21,8 @@ const DEFAULT_CONFIG: &str = include_str!("../../config.json");
 const DEFAULT_POOL_HOST: &str = "public-pool.io";
 const DEFAULT_POOL_PORT: u16 = 3333;
 const DEFAULT_POOL_PASSWORD: &str = "x";
+const DEFAULT_PET_PROFILE_ID: &str = "classic-slot";
+const BUILTIN_PET_PROFILE_IDS: &[&str] = &["classic-slot", "cyber-miner", "lucky-cat"];
 const OLD_PUBLIC_POOL_PORT: u16 = 21496;
 const DIAGNOSTIC_SCHEMA_VERSION: u32 = 2;
 
@@ -66,6 +68,7 @@ struct AppConfig {
     gpu_enabled: bool,
     gpu_device_id: Option<String>,
     gpu_intensity_percent: u8,
+    pet_profile_id: String,
 }
 
 impl Default for AppConfig {
@@ -90,6 +93,7 @@ impl Default for AppConfig {
             gpu_enabled: false,
             gpu_device_id: None,
             gpu_intensity_percent: 10,
+            pet_profile_id: DEFAULT_PET_PROFILE_ID.into(),
         }
     }
 }
@@ -101,6 +105,7 @@ impl AppConfig {
         self.pool_password = normalize_pool_password(&self.pool_password);
         self.worker_name = self.worker_name.trim().to_owned();
         self.webhook_url = self.webhook_url.trim().to_owned();
+        self.pet_profile_id = normalize_pet_profile_id(&self.pet_profile_id);
         self.real_mining_enabled = false;
         self.gpu_device_id = self
             .gpu_device_id
@@ -189,6 +194,7 @@ struct DiagnosticConfig {
     gpu_enabled: bool,
     gpu_device_id: Option<String>,
     gpu_intensity_percent: u8,
+    pet_profile_id: String,
     enable_notifications: bool,
     notify_on_jackpot: bool,
     notify_on_share_accepted: bool,
@@ -239,6 +245,15 @@ fn normalize_pool_password(password: &str) -> String {
         DEFAULT_POOL_PASSWORD.into()
     } else {
         trimmed.to_owned()
+    }
+}
+
+fn normalize_pet_profile_id(profile_id: &str) -> String {
+    let trimmed = profile_id.trim();
+    if BUILTIN_PET_PROFILE_IDS.contains(&trimmed) {
+        trimmed.to_owned()
+    } else {
+        DEFAULT_PET_PROFILE_ID.into()
     }
 }
 
@@ -494,6 +509,7 @@ fn diagnostic_config(config: AppConfig) -> DiagnosticConfig {
         gpu_enabled: config.gpu_enabled,
         gpu_device_id: config.gpu_device_id,
         gpu_intensity_percent: config.gpu_intensity_percent,
+        pet_profile_id: config.pet_profile_id,
         enable_notifications: config.enable_notifications,
         notify_on_jackpot: config.notify_on_jackpot,
         notify_on_share_accepted: config.notify_on_share_accepted,
@@ -835,6 +851,26 @@ mod tests {
         assert_eq!(normalized.compute_mode, ComputeMode::Gpu);
         assert!(normalized.gpu_enabled);
         assert_eq!(normalized.cpu_threads, 0);
+    }
+
+    #[test]
+    fn pet_profile_id_defaults_and_rejects_unknown_values() {
+        let default = AppConfig::default().normalized();
+        assert_eq!(default.pet_profile_id, "classic-slot");
+
+        let known = AppConfig {
+            pet_profile_id: " cyber-miner ".into(),
+            ..AppConfig::default()
+        }
+        .normalized();
+        assert_eq!(known.pet_profile_id, "cyber-miner");
+
+        let unknown = AppConfig {
+            pet_profile_id: "mystery-pack".into(),
+            ..AppConfig::default()
+        }
+        .normalized();
+        assert_eq!(unknown.pet_profile_id, "classic-slot");
     }
 
     #[test]

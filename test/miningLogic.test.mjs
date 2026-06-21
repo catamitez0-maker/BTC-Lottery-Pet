@@ -32,6 +32,21 @@ import {
   startJackpotSequence,
 } from "../.test-dist/domain/jackpotSequence.js";
 import { createSimulationEngine } from "../.test-dist/engines/miningEngine.js";
+import {
+  derivePetCompanionSnapshot,
+  petMoodFromStatus,
+} from "../.test-dist/pets/companion.js";
+import {
+  DEFAULT_PET_PROFILE_ID,
+  PET_PROFILE_STATUSES,
+  builtinPetProfileIds,
+  builtinPetProfiles,
+  getPetProfile,
+  isKnownPetProfileId,
+  missingPetStates,
+  normalizePetProfileId,
+  validatePetManifest,
+} from "../.test-dist/pets/profiles.js";
 
 const systemInfo = {
   available_parallelism: 8,
@@ -66,6 +81,7 @@ function validConfig(overrides = {}) {
     gpu_enabled: false,
     gpu_device_id: null,
     gpu_intensity_percent: 10,
+    pet_profile_id: DEFAULT_PET_PROFILE_ID,
     ...overrides,
   };
 }
@@ -136,7 +152,129 @@ test("config normalization trims fields and records GPU-only as zero CPU threads
   assert.equal(normalized.gpu_enabled, true);
   assert.equal(normalized.gpu_device_id, "gpu-0");
   assert.equal(normalized.gpu_intensity_percent, 100);
+  assert.equal(normalized.pet_profile_id, DEFAULT_PET_PROFILE_ID);
   assert.equal(normalized.webhook_url, "https://example.invalid/hook");
+});
+
+test("pet profile registry validates manifests and normalizes unknown ids", () => {
+  assert.equal(normalizePetProfileId("cyber-miner"), "cyber-miner");
+  assert.equal(normalizePetProfileId("missing-profile"), DEFAULT_PET_PROFILE_ID);
+  assert.equal(getPetProfile(null).id, DEFAULT_PET_PROFILE_ID);
+  assert.equal(isKnownPetProfileId("lucky-cat"), true);
+  assert.equal(isKnownPetProfileId("missing-profile"), false);
+  assert.deepEqual(builtinPetProfileIds, ["classic-slot", "cyber-miner", "lucky-cat"]);
+
+  const nonObjectValidation = validatePetManifest(null);
+  assert.equal(nonObjectValidation.ok, false);
+  assert.equal(nonObjectValidation.errors.includes("manifest must be an object"), true);
+
+  for (const profile of builtinPetProfiles) {
+    assert.deepEqual(missingPetStates(profile), []);
+    assert.deepEqual(validatePetManifest(profile), { ok: true, errors: [] });
+    assert.equal(profile.manifestVersion, 1);
+    assert.equal(profile.kind, "procedural");
+    assert.equal(typeof profile.body.shape, "string");
+    assert.equal(typeof profile.body.silhouette, "string");
+    assert.equal(typeof profile.body.screenShape, "string");
+    assert.equal(typeof profile.body.feet, "string");
+    assert.equal(typeof profile.body.idlePose, "string");
+    assert.equal(Array.isArray(profile.body.accentMarks), true);
+    assert.equal(typeof profile.personality.name, "string");
+    assert.equal(typeof profile.personality.voice.jackpot, "string");
+    for (const status of PET_PROFILE_STATUSES) {
+      assert.equal(typeof profile.states[status].expression, "string");
+      assert.equal(profile.states[status].slots.length, 3);
+    }
+  }
+
+  const invalidManifest = {
+    ...getPetProfile("classic-slot"),
+    id: "Bad Id",
+    palette: {
+      ...getPetProfile("classic-slot").palette,
+      primary: "orange",
+    },
+    body: {
+      ...getPetProfile("classic-slot").body,
+      silhouette: "unknown-body",
+      accentMarks: ["bad mark"],
+    },
+    reels: [["B"], [], ["C"]],
+    states: {
+      ...getPetProfile("classic-slot").states,
+      Mining: {
+        ...getPetProfile("classic-slot").states.Mining,
+        slots: ["-", "-", ""],
+        animation: "teleport",
+      },
+    },
+  };
+  const validation = validatePetManifest(invalidManifest);
+  assert.equal(validation.ok, false);
+  assert.equal(validation.errors.includes("id must use lowercase letters, numbers, and dashes"), true);
+  assert.equal(validation.errors.includes("palette.primary must be a #RRGGBB color"), true);
+  assert.equal(validation.errors.includes("body.silhouette is not supported"), true);
+  assert.equal(validation.errors.includes("body.accentMarks must contain class-safe tokens"), true);
+  assert.equal(validation.errors.includes("reels.1 must contain symbols"), true);
+  assert.equal(validation.errors.includes("states.Mining.slots must contain exactly 3 symbols"), true);
+  assert.equal(validation.errors.includes("states.Mining.animation is not supported"), true);
+});
+
+test("pet companion snapshot adds mood, care, and personality feedback", () => {
+  const profile = getPetProfile("cyber-miner");
+  const baseContext = {
+    profile,
+    petState: "IDLE",
+    petStatus: "Sleeping",
+    isMining: false,
+    realModeEnabled: false,
+    computeMode: "cpu",
+    connectionStatus: "Stopped",
+    latestLog: "Ready",
+    lastEvent: null,
+    acceptedShares: 0,
+    rejectedShares: 0,
+    bestDifficulty: 1,
+    hashrate: 0,
+    luckMeter: 0,
+    miningUptimeSeconds: 0,
+    appUptimeSeconds: 0,
+  };
+
+  const resting = derivePetCompanionSnapshot(baseContext);
+  assert.equal(resting.name, "Volt");
+  assert.equal(resting.mood, "resting");
+  assert.equal(resting.reaction, profile.personality.voice.idle);
+  assert.equal(resting.badges[0][0], "MOOD");
+
+  const overdrive = derivePetCompanionSnapshot({
+    ...baseContext,
+    petState: "MINING_GPU",
+    petStatus: "Overdrive",
+    isMining: true,
+    realModeEnabled: true,
+    computeMode: "gpu",
+    connectionStatus: "Mining",
+    acceptedShares: 3,
+    bestDifficulty: 128,
+    hashrate: 1_000_000,
+    luckMeter: 68,
+    miningUptimeSeconds: 45,
+  });
+  assert.equal(overdrive.mood, "hyped");
+  assert.equal(overdrive.badges[2][1], "GPU");
+  assert.equal(overdrive.care.focus.value > resting.care.focus.value, true);
+  assert.equal(overdrive.care.bond.value > resting.care.bond.value, true);
+
+  const rejected = derivePetCompanionSnapshot({
+    ...baseContext,
+    petStatus: "Mining",
+    lastEvent: createShareEvent("share_rejected", "simulation", "Rejected"),
+  });
+  assert.equal(rejected.reaction, profile.personality.voice.rejected);
+
+  assert.equal(petMoodFromStatus("Jackpot"), "proud");
+  assert.equal(petMoodFromStatus("Connection Error"), "stressed");
 });
 
 test("config normalization shares backend port and worker defaults", () => {

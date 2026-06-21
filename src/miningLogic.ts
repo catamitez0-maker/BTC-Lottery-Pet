@@ -1,4 +1,5 @@
 import type { PetStatus } from "./domain/petState";
+import { normalizePetProfileId } from "./pets/profiles.js";
 
 export type { PetStatus } from "./domain/petState";
 export type ComputeMode = "cpu" | "gpu" | "hybrid";
@@ -26,6 +27,7 @@ export interface AppConfig {
   gpu_enabled: boolean;
   gpu_device_id: string | null;
   gpu_intensity_percent: number;
+  pet_profile_id: string;
 }
 
 export interface SystemInfo {
@@ -134,6 +136,7 @@ function normalizePoolPassword(poolPassword: string | null | undefined) {
   return trimmed || "x";
 }
 
+
 export function normalizeAppConfig(
   config: AppConfig,
   systemInfo: SystemInfo,
@@ -166,6 +169,7 @@ export function normalizeAppConfig(
       100,
       Math.max(1, Math.trunc(Number(config.gpu_intensity_percent) || 10)),
     ),
+    pet_profile_id: normalizePetProfileId(config.pet_profile_id),
   };
 }
 

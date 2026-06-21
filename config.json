@@ -17,5 +17,6 @@
   "compute_mode": "cpu",
   "gpu_enabled": false,
   "gpu_device_id": null,
-  "gpu_intensity_percent": 10
+  "gpu_intensity_percent": 10,
+  "pet_profile_id": "classic-slot"
 }
