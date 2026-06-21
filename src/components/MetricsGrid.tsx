@@ -23,14 +23,26 @@ export default function MetricsGrid({
     return null;
   }
 
+  const primaryMetrics = metrics.slice(0, 4);
+  const secondaryMetrics = metrics.slice(4);
+
   return (
     <>
-      <section className="metrics">
-        {metrics.map(([label, value]) => (
+      <section className="metrics primary-metrics" aria-label="Primary mining metrics">
+        {primaryMetrics.map(([label, value]) => (
           <article key={label}>
             <p className="label">{label}</p>
             <strong title={value}>{value}</strong>
           </article>
+        ))}
+      </section>
+
+      <section className="secondary-metrics" aria-label="Secondary mining metrics">
+        {secondaryMetrics.map(([label, value]) => (
+          <span key={label}>
+            <b>{label}</b>
+            {value}
+          </span>
         ))}
       </section>
 

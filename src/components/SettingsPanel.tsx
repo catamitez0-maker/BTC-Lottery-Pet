@@ -1,4 +1,5 @@
-import React, { useMemo } from "react";
+import { useMemo } from "react";
+import type { CSSProperties, Dispatch, SetStateAction } from "react";
 import type {
   AppConfig,
   ComputeMode,
@@ -10,10 +11,13 @@ import type {
   NotificationChannel,
   PoolDiagnosticReport,
 } from "../miningLogic";
+import { builtinPetProfiles, getPetProfile } from "../pets/profiles";
+
+type PetOptionStyle = CSSProperties & { [key: `--${string}`]: string };
 
 interface SettingsPanelProps {
   draftConfig: AppConfig;
-  setDraftConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
+  setDraftConfig: Dispatch<SetStateAction<AppConfig>>;
   setShowSettings: (show: boolean) => void;
   saveSettings: () => Promise<void>;
   runGpuBenchmark: () => Promise<void>;
@@ -34,6 +38,14 @@ interface SettingsPanelProps {
   isGpuComputeMode: (mode: ComputeMode) => boolean;
   hasHardwareGpuDevice: (devices: GpuDevice[]) => boolean;
   hasSoftwareGpuDevice: (devices: GpuDevice[]) => boolean;
+}
+
+function petOptionStyle(primary: string, secondary: string): PetOptionStyle {
+  return {
+    "--pet-option-primary": primary,
+    "--pet-option-secondary": secondary,
+    "--pet-option-glow": primary,
+  } as PetOptionStyle;
 }
 
 export default function SettingsPanel({
@@ -58,6 +70,7 @@ export default function SettingsPanel({
   const isDraftGpuOnly = draftConfig.compute_mode === "gpu";
   const hardwareGpuAvailable = hasHardwareGpuDevice(gpuDevices);
   const softwareGpuAvailable = hasSoftwareGpuDevice(gpuDevices);
+  const selectedPetProfile = getPetProfile(draftConfig.pet_profile_id);
 
   const draftEffectiveCpuThreads = threadsForPreset(
     draftConfig.performance_preset,
@@ -87,6 +100,48 @@ export default function SettingsPanel({
             X
           </button>
         </div>
+        <section className="pet-settings-panel" aria-label="Pet profile">
+          <div className="settings-section-heading">
+            <p className="eyebrow">PET PROFILE</p>
+            <strong>{selectedPetProfile.name}</strong>
+          </div>
+          <div className="pet-profile-summary">
+            <span>{selectedPetProfile.personality.name}</span>
+            <b>{selectedPetProfile.personality.species}</b>
+            <small>
+              {selectedPetProfile.personality.trait} / {selectedPetProfile.body.silhouette} / {selectedPetProfile.body.screenShape} screen / likes {selectedPetProfile.personality.favoriteSignal}
+            </small>
+          </div>
+          <div className="pet-profile-picker">
+            {builtinPetProfiles.map((profile) => (
+              <button
+                className={`pet-profile-option ${selectedPetProfile.id === profile.id ? "selected" : ""}`}
+                key={profile.id}
+                onClick={() =>
+                  setDraftConfig({
+                    ...draftConfig,
+                    pet_profile_id: profile.id,
+                  })
+                }
+                style={petOptionStyle(profile.palette.primary, profile.palette.secondary)}
+                type="button"
+              >
+                <span className="pet-swatch" aria-hidden="true" />
+                <span>
+                  <b>{profile.name}</b>
+                  <small>{profile.personality.name} / {profile.body.silhouette}</small>
+                </span>
+              </button>
+            ))}
+            <button className="pet-profile-option import-slot" disabled type="button">
+              <span className="pet-swatch" aria-hidden="true" />
+              <span>
+                <b>Custom Manifest</b>
+                <small>manifest v1 / procedural or sprite-ready</small>
+              </span>
+            </button>
+          </div>
+        </section>
         <div className="form-grid">
           <label>
             BTC ADDRESS

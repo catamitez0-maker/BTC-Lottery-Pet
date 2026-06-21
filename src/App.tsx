@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useMemo, useState, useRef } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import Header from "./components/Header";
 import PetDisplay from "./components/PetDisplay";
 import MetricsGrid from "./components/MetricsGrid";
@@ -56,6 +56,8 @@ import { useDiagnosticsActions } from "./hooks/useDiagnosticsActions";
 import { useHeartbeatNotifications } from "./hooks/useHeartbeatNotifications";
 import { useSimulationMiningSession } from "./hooks/useSimulationMiningSession";
 import { notificationSettingsFromConfig } from "./notificationSettings";
+import { derivePetCompanionSnapshot } from "./pets/companion";
+import { getPetProfile } from "./pets/profiles";
 import {
   expectedSharesPerHour,
   formatDifficulty,
@@ -103,6 +105,7 @@ const fallbackConfig: AppConfig = {
   gpu_enabled: false,
   gpu_device_id: null,
   gpu_intensity_percent: 10,
+  pet_profile_id: "classic-slot",
 };
 
 const fallbackSystemInfo: SystemInfo = {
@@ -838,6 +841,7 @@ function App() {
   };
   const petState = derivePetState(petStateContext);
   const petStatus: PetStatus = petStatusFromState(petState, petStateContext);
+  const activePetProfile = getPetProfile(config.pet_profile_id);
 
   const engineLifecycle: MiningEngineLifecycle = {
     prepareStart: prepareMiningStart,
@@ -938,18 +942,39 @@ function App() {
   const sharesValue = realModeEnabled
     ? `${realStats.accepted_shares} / ${realStats.rejected_shares}`
     : `${simAccepted} / ${simRejected}`;
+  const acceptedShares = realModeEnabled ? realStats.accepted_shares : simAccepted;
+  const rejectedShares = realModeEnabled ? realStats.rejected_shares : simRejected;
+  const activeHashrate = realModeEnabled ? realStats.hashrate : simulationStats.hashrate * 1_000_000;
 
   const displayedHashrate = realModeEnabled
     ? formatHashrate(realStats.hashrate)
     : `${simulationStats.hashrate.toFixed(2)} MH/s`;
   const probabilitySnapshot: ProbabilitySnapshot = calculateProbabilitySnapshot({
     currentDifficulty: null,
-    hashrate: realModeEnabled ? realStats.hashrate : simulationStats.hashrate * 1_000_000,
+    hashrate: activeHashrate,
     bestDifficulty: activeBestDiff,
-    acceptedShares: realModeEnabled ? realStats.accepted_shares : simAccepted,
-    rejectedShares: realModeEnabled ? realStats.rejected_shares : simRejected,
+    acceptedShares,
+    rejectedShares,
     miningUptimeSeconds: miningUptime,
     realModeEnabled,
+  });
+  const petCompanion = derivePetCompanionSnapshot({
+    profile: activePetProfile,
+    petState,
+    petStatus,
+    isMining,
+    realModeEnabled,
+    computeMode: config.compute_mode,
+    connectionStatus: realStats.connection_status,
+    latestLog,
+    lastEvent: lastMiningEvent,
+    acceptedShares,
+    rejectedShares,
+    bestDifficulty: activeBestDiff,
+    hashrate: activeHashrate,
+    luckMeter: probabilitySnapshot.luckMeter,
+    miningUptimeSeconds: miningUptime,
+    appUptimeSeconds: appUptime,
   });
   const compactComputeMode = realModeEnabled
     ? gpuEnabled ? (config.compute_mode === "hybrid" ? "CPU+GPU" : "GPU") : "CPU"
@@ -1006,7 +1031,10 @@ function App() {
   const resourceMetrics: [string, string][] = [
     ["MODE SELECT", miningModeLabel(selectedMiningMode)],
     ["ENGINE", miningEngineStatus.kind.toUpperCase()],
+    ["PET", petCompanion.name],
+    ["MOOD", petCompanion.moodLabel],
     ["PET STATE", miningEngineStatus.label],
+    ["BOND", `${petCompanion.care.bond.value}%`],
     ["EVENT", miningEventLabel(lastMiningEvent)],
     ["PET LOGS", `${petLogs.length}`],
     ["DEV LOGS", `${devLogs.length}`],
@@ -1032,31 +1060,8 @@ function App() {
     ["MINING UPTIME", formatUptime(miningUptime)],
   ];
 
-  const isDraftGpuOnly = draftConfig.compute_mode === "gpu";
-  const hardwareGpuAvailable = hasHardwareGpuDevice(gpuDevices);
-  const softwareGpuAvailable = hasSoftwareGpuDevice(gpuDevices);
-  const draftEffectiveCpuThreads = threadsForPreset(
-    draftConfig.performance_preset,
-    systemInfo,
-    Number(draftConfig.cpu_threads),
-    isDraftGpuOnly,
-  );
-  const cpuThreadOptions = useMemo(() => {
-    const available = Math.max(1, systemInfo.available_parallelism);
-    const rec = systemInfo.recommended_cpu_threads;
-    const base = isDraftGpuOnly ? [0] : [1, 2, rec, draftEffectiveCpuThreads, 4, available];
-    return Array.from(new Set(base))
-      .filter((threads) => threads <= available && (isDraftGpuOnly ? threads === 0 : threads >= 1))
-      .sort((left, right) => left - right);
-  }, [
-    draftEffectiveCpuThreads,
-    systemInfo.available_parallelism,
-    systemInfo.recommended_cpu_threads,
-    isDraftGpuOnly,
-  ]);
-
   return (
-    <main className={`pet-shell ${displayMode} ${petState === "LUCKY_EVENT" ? "lucky" : ""} jackpot-${jackpotSequence.phase}`}>
+    <main className={`pet-shell ${displayMode} pet-profile-${activePetProfile.id} ${petState === "LUCKY_EVENT" ? "lucky" : ""} jackpot-${jackpotSequence.phase}`}>
       <Header
         realModeEnabled={realModeEnabled}
         computeMode={config.compute_mode}
@@ -1070,6 +1075,8 @@ function App() {
 
       <section className="status-row">
         <PetDisplay
+          petProfile={activePetProfile}
+          companion={petCompanion}
           petStatus={petStatus}
           isMiningAnimation={isMiningAnimation}
           displayMode={displayMode}
@@ -1154,12 +1161,12 @@ function App() {
       {showModeSelection && (
         <section className="overlay mode-selection-overlay" role="dialog" aria-modal="true" aria-label="Choose mining mode">
           <div className="warning-card mode-selection-card">
-            <p className="eyebrow">CHOOSE MODE</p>
-            <h2>BTC Lottery Pet</h2>
+            <p className="eyebrow">ARCADE BOOT</p>
+            <h2>Choose your run</h2>
             <div className="mode-selection-grid">
               {miningModeOptions.map((option) => (
                 <button
-                  className="mode-choice"
+                  className={`mode-choice mode-choice-${option.mode}`}
                   key={option.mode}
                   onClick={() => selectMiningMode(option.mode)}
                   type="button"
@@ -1167,6 +1174,13 @@ function App() {
                   <span>{option.title}</span>
                   <b>{option.label}</b>
                   <small>{option.description}</small>
+                  <em>
+                    {option.realModeEnabled
+                      ? option.computeMode === "gpu"
+                        ? "GPU pressure"
+                        : "real pool"
+                      : "safe simulation"}
+                  </em>
                 </button>
               ))}
             </div>
